@@ -10,11 +10,14 @@ DBG=/sys/kernel/debug
 DCVS=$DBG/kgsl/kgsl-3d0/host_based_dcvs
 REQ=/data/local/tmp/m3q_uv_request
 KEEPER=""
-PATCHED=0
-REFRESH_STARTED=0
 
 say() { echo "[m3q-uv] $*"; }
 fail() { say "FAIL: $*" >&2; exit 1; }
+reboot_required() {
+  say "FAIL: $*" >&2
+  say "REAL REBOOT REQUIRED; do not retry in this boot" >&2
+  exit 2
+}
 
 remove_probes() {
   echo 0 > "$TR/tracing_on" 2>/dev/null || true
@@ -47,18 +50,25 @@ wait_for_state() {
   return 1
 }
 
-rollback_before_refresh() {
+rollback_fail() {
+  reason=$1
   remove_probes
   rm -f "$REQ"
-  [ -n "$KEEPER" ] && [ -d "/proc/$KEEPER" ] || return 1
-  kill -TERM "$KEEPER" 2>/dev/null || return 1
+
+  [ -n "$KEEPER" ] && [ -d "/proc/$KEEPER" ] || \
+    reboot_required "$reason; keeper disappeared before rollback proof"
+
+  kill -TERM "$KEEPER" 2>/dev/null || \
+    reboot_required "$reason; cannot request rollback"
+
   if wait_for_state m3q_uv_stock; then
-    say "stock table rollback verified"
-    return 0
+    fail "$reason; stock table rollback verified"
   fi
+
   state=$(keeper_state 2>/dev/null || true)
-  [ "$state" = "m3q_uv_dirty" ] && return 2
-  return 1
+  [ "$state" = "m3q_uv_dirty" ] && \
+    reboot_required "$reason; kernel-table rollback failed"
+  reboot_required "$reason; rollback state was not proven"
 }
 
 fatal_after_refresh() {
@@ -68,16 +78,15 @@ fatal_after_refresh() {
   remove_probes
   rm -f "$REQ"
 
-  # Best effort only. Once a GMU refresh has started, a failed proof means
-  # firmware state cannot be proven stock without a real reboot.
+  # Best effort only. Once a GMU refresh starts, failed proof means firmware
+  # state cannot be proven stock without a real reboot.
   if [ -r "$DCVS" ]; then
     mode=$(cat "$DCVS" 2>/dev/null || true)
     [ "$mode" = "0" ] || echo 0 > "$DCVS" 2>/dev/null || true
   fi
   [ -n "$KEEPER" ] && [ -d "/proc/$KEEPER" ] && \
     kill -TERM "$KEEPER" 2>/dev/null || true
-  say "REAL REBOOT REQUIRED; do not retry in this boot" >&2
-  exit 2
+  reboot_required "$reason"
 }
 
 [ "$(id -u)" = "0" ] || fail "run through KernelSU root"
@@ -140,58 +149,36 @@ say "requesting bounded 18-state patch"
 kill -USR1 "$KEEPER" || fail "cannot signal keeper"
 
 if ! wait_for_state m3q_uv_patched m3q_uv_stock; then
-  rc=$?
   state=$(keeper_state 2>/dev/null || true)
-  [ $rc -eq 2 ] || [ "$state" = "m3q_uv_dirty" ] && {
-    say "kernel-table state uncertain; REAL REBOOT REQUIRED" >&2
-    exit 2
-  }
-  fail "keeper disappeared before a verified state"
+  [ "$state" = "m3q_uv_dirty" ] && \
+    reboot_required "kernel-table state became uncertain during patch"
+  reboot_required "keeper disappeared before a verified patched/stock state"
 fi
 
 STATE=$(keeper_state 2>/dev/null || true)
 if [ "$STATE" = "m3q_uv_stock" ]; then
   fail "request refused or write failed; stock table was verified"
 fi
-[ "$STATE" = "m3q_uv_patched" ] || fail "unexpected keeper state '$STATE'"
-PATCHED=1
+[ "$STATE" = "m3q_uv_patched" ] || \
+  reboot_required "unexpected keeper state '$STATE' after patch request"
 say "stock signature + 18-state write/readback PASS"
 
-# From this point on, any refresh-proof failure requires a real reboot.
+# Set up proof probes before the first GMU refresh. Any failure here can still
+# be rolled back without having sent the modified table to firmware.
 remove_probes
-: > "$TR/trace" || {
-  rollback_before_refresh || true
-  fail "cannot clear trace before refresh"
-}
+: > "$TR/trace" || rollback_fail "cannot clear trace before refresh"
 echo 'p:m3quv/send msm_kgsl:gen8_hfi_send_gpu_perf_table' \
-  > "$TR/kprobe_events" || {
-  rollback_before_refresh || true
-  fail "cannot install send kprobe"
-}
+  > "$TR/kprobe_events" || rollback_fail "cannot install send kprobe"
 echo 'p:m3quv/build msm_kgsl:gen8_build_rpmh_tables' \
-  >> "$TR/kprobe_events" || {
-  rollback_before_refresh || true
-  fail "cannot install build kprobe"
-}
-echo 1 > "$TR/events/m3quv/send/enable" || {
-  rollback_before_refresh || true
-  fail "cannot enable send probe"
-}
-echo 1 > "$TR/events/m3quv/build/enable" || {
-  rollback_before_refresh || true
-  fail "cannot enable build probe"
-}
+  >> "$TR/kprobe_events" || rollback_fail "cannot install build kprobe"
+echo 1 > "$TR/events/m3quv/send/enable" || \
+  rollback_fail "cannot enable send probe"
+echo 1 > "$TR/events/m3quv/build/enable" || \
+  rollback_fail "cannot enable build probe"
 
 # Proven stock power-cycle path: 0 -> 1.
-: > "$TR/trace" || {
-  rollback_before_refresh || true
-  fail "cannot clear trace for 0->1"
-}
-echo 1 > "$TR/tracing_on" || {
-  rollback_before_refresh || true
-  fail "cannot enable tracing for 0->1"
-}
-REFRESH_STARTED=1
+: > "$TR/trace" || rollback_fail "cannot clear trace for 0->1"
+echo 1 > "$TR/tracing_on" || rollback_fail "cannot enable tracing for 0->1"
 echo 1 > "$DCVS" || fatal_after_refresh "host_based_dcvs 0->1 write failed"
 sleep 0.15
 echo 0 > "$TR/tracing_on" 2>/dev/null || true
@@ -227,9 +214,8 @@ rm -f "$REQ"
 say "committing only after final host-table revalidation"
 kill -USR2 "$KEEPER" || fatal_after_refresh "cannot signal COMMIT"
 if ! wait_for_state m3q_uv_commit m3q_uv_stock; then
-  rc=$?
   state=$(keeper_state 2>/dev/null || true)
-  [ $rc -eq 2 ] || [ "$state" = "m3q_uv_dirty" ] && \
+  [ "$state" = "m3q_uv_dirty" ] && \
     fatal_after_refresh "final host-table verification became uncertain"
   fatal_after_refresh "keeper disappeared without a verified COMMIT state"
 fi
