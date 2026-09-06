@@ -103,9 +103,18 @@ fi
 [ -r "$DCVS" ] || mount -t debugfs debugfs "$DBG" 2>/dev/null || true
 [ -r "$DCVS" ] || fail "host_based_dcvs unavailable"
 
-PIDS=$(pidof m3q_uv_ready 2>/dev/null || true)
+find_ready_keepers() {
+  for proc in /proc/[0-9]*; do
+    [ -r "$proc/comm" ] || continue
+    comm=$(cat "$proc/comm" 2>/dev/null || true)
+    [ "$comm" = "m3q_uv_ready" ] || continue
+    echo "${proc#/proc/}"
+  done
+}
+
+PIDS=$(find_ready_keepers)
 set -- $PIDS
-[ "$#" -eq 1 ] || fail "expected exactly one m3q_uv_ready keeper; got '${PIDS:-none}'"
+[ "$#" -eq 1 ] || fail "expected exactly one m3q_uv_ready keeper by /proc/*/comm; got '${PIDS:-none}'"
 KEEPER=$1
 say "keeper pid=$KEEPER"
 
