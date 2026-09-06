@@ -7,6 +7,12 @@ on:
     paths:
       - 'overlays/manual-uv/**'
       - '.github/workflows/manual-uv-overlay.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'overlays/manual-uv/**'
+      - '.github/workflows/manual-uv-overlay.yml'
   workflow_dispatch:
 
 permissions:
