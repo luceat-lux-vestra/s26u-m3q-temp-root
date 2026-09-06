@@ -25,10 +25,12 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - name: Checkout overlay branch
+      - name: Checkout exact overlay HEAD
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: overlay
+          fetch-depth: 1
 
       - name: Checkout latest upstream
         uses: actions/checkout@v4
@@ -42,11 +44,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "OVERLAY_SHA=$(git -C overlay rev-parse HEAD)" >> "$GITHUB_ENV"
-          echo "UPSTREAM_SHA=$(git -C src rev-parse HEAD)" >> "$GITHUB_ENV"
-          printf 'overlay=%s\nupstream=%s\n' \
-            "$(git -C overlay rev-parse HEAD)" \
-            "$(git -C src rev-parse HEAD)"
+          EXPECTED_OVERLAY='${{ github.event.pull_request.head.sha || github.sha }}'
+          ACTUAL_OVERLAY="$(git -C overlay rev-parse HEAD)"
+          ACTUAL_UPSTREAM="$(git -C src rev-parse HEAD)"
+          test "$ACTUAL_OVERLAY" = "$EXPECTED_OVERLAY"
+          echo "OVERLAY_SHA=$ACTUAL_OVERLAY" >> "$GITHUB_ENV"
+          echo "UPSTREAM_SHA=$ACTUAL_UPSTREAM" >> "$GITHUB_ENV"
+          printf 'overlay=%s\nupstream=%s\n' "$ACTUAL_OVERLAY" "$ACTUAL_UPSTREAM"
 
       - name: Fail closed if overlay no longer applies
         shell: bash
@@ -69,6 +73,13 @@ jobs:
             src/exploit/src/targets/m3q-BP4A.251205.006/pipe.c
           grep -Fq 'M3Q_GPU_LEVEL_COUNT 20U' \
             src/exploit/src/targets/m3q-BP4A.251205.006/pipe.c
+
+      - name: Validate manual apply script syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n overlay/overlays/manual-uv/apply_gpu_uv.sh
+          dash -n overlay/overlays/manual-uv/apply_gpu_uv.sh
 
       - name: Make overlay APK install side-by-side
         shell: bash
@@ -148,7 +159,7 @@ jobs:
           set -euo pipefail
           ./gradlew --no-daemon :app:lintRelease :app:assembleRelease
 
-      - name: Package proof bundle
+      - name: Package self-verifying proof bundle
         shell: bash
         run: |
           set -euo pipefail
@@ -159,9 +170,12 @@ jobs:
           chmod +x out/apply_gpu_uv.sh
           printf '%s\n' "$UPSTREAM_SHA" > out/UPSTREAM_SHA.txt
           printf '%s\n' "$OVERLAY_SHA" > out/OVERLAY_SHA.txt
-          sha256sum out/m3q-root-manual-uv.apk out/apply_gpu_uv.sh \
-            > out/SHA256SUMS.txt
-          cat out/SHA256SUMS.txt
+          (
+            cd out
+            sha256sum m3q-root-manual-uv.apk apply_gpu_uv.sh > SHA256SUMS.txt
+            sha256sum -c SHA256SUMS.txt
+            cat SHA256SUMS.txt
+          )
 
       - name: Upload all-green artifact
         uses: actions/upload-artifact@v4
