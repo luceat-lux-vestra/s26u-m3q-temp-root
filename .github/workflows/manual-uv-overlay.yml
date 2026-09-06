@@ -119,9 +119,11 @@ jobs:
           yes | sdkmanager --licenses >/dev/null || true
           sdkmanager \
             'platform-tools' \
-            'platforms;android-37' \
+            'platforms;android-37.0' \
             'build-tools;37.0.0' \
             'ndk;29.0.14206865'
+          test -d "$ANDROID_SDK_ROOT/platforms/android-37.0"
+          test -x "$ANDROID_SDK_ROOT/ndk/29.0.14206865/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android35-clang"
           echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Build native payloads
