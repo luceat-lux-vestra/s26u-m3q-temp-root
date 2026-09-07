@@ -70,6 +70,12 @@ The pinned Root-My-Galaxy Samsung patchset is
 Neither candidate is wired into the Android app until its ABI/import contract is checked against the
 exact AZHJ target and the proven AZG3 module configuration is identified.
 
+## Merge gate
+
+The branch remains **FAIL / draft only** until the KernelSU candidate is proven, the final app package
+is built and inspected, and the bounded device preflight succeeds. Any uncertain kernel mutation
+invalidates the boot for further write attempts and requires a real reboot.
+
 ## Build
 
 Linux:
