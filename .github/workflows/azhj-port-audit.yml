@@ -45,3 +45,101 @@ jobs:
           ./android/build-native-azhj.sh
           file exploit/build/m3q-BP4A.251205.006-AZHJ/bin/*
           sha256sum exploit/build/m3q-BP4A.251205.006-AZHJ/bin/*
+
+  kernelsu-candidate-build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min:android16-6.12-20260313
+      options: --privileged
+    steps:
+      - name: Checkout KernelSU v3.2.5 and pinned Samsung patchset
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git clone https://github.com/tiann/KernelSU.git /work/KernelSU
+          git -C /work/KernelSU checkout b0bc817b4e966aa6aa830834eaf6ef765d821d40
+          git clone https://github.com/BuSung-dev/Root-My-Galaxy-Payloads.git /work/rmg
+          git -C /work/rmg checkout 6e3223e689688540060ddd97a0927e927bfed207
+          git -C /work/KernelSU apply \
+            /work/rmg/kernelsu/patches/KernelSU-v3.2.5-samsung-kdp-rkp-defex.patch
+          git -C /work/KernelSU diff --check
+
+      - name: Pin exact AZHJ kernel release
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k'
+          old=$(cat "$KDIR/include/config/kernel.release")
+          echo "ddk_release_before=$old"
+          printf '%s\n' "$target" > "$KDIR/include/config/kernel.release"
+          sed -i "s|$old|$target|g" "$KDIR/include/generated/utsrelease.h"
+          echo '--- exact release files ---'
+          cat "$KDIR/include/config/kernel.release"
+          cat "$KDIR/include/generated/utsrelease.h"
+
+      - name: Build Samsung KDP/RKP/DEFEX candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /work/KernelSU/kernel
+          make clean
+          CONFIG_KSU=m \
+          CONFIG_KSU_SAMSUNG_KDP=y \
+          CONFIG_KSU_SAMSUNG_RKP=y \
+          CONFIG_KSU_SAMSUNG_DEFEX=y \
+          CC=clang make -j"$(nproc)"
+          cp kernelsu.ko /tmp/kernelsu-azhj-kdp.ko
+
+      - name: Build Samsung no-patch-text candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /work/KernelSU/kernel
+          make clean
+          CONFIG_KSU=m \
+          CONFIG_KSU_SAMSUNG_KDP=y \
+          CONFIG_KSU_SAMSUNG_RKP=y \
+          CONFIG_KSU_SAMSUNG_DEFEX=y \
+          CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y \
+          CC=clang make -j"$(nproc)"
+          cp kernelsu.ko /tmp/kernelsu-azhj-kdp-no-patch-text.ko
+
+      - name: Audit candidate metadata and imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in /tmp/kernelsu-azhj-kdp.ko /tmp/kernelsu-azhj-kdp-no-patch-text.ko; do
+            echo "===== $module ====="
+            sha256sum "$module"
+            file "$module"
+            echo '--- modinfo ---'
+            modinfo "$module" || true
+            echo '--- __versions ---'
+            readelf -SW "$module" | grep -E '__versions|\.symtab|\.strtab' || true
+            echo '--- undefined imports ---'
+            readelf -Ws "$module" \
+              | awk '$7 == "UND" && $8 != "" {print $8}' \
+              | sort -u | tee "${module}.imports"
+            echo "undefined_count=$(wc -l < "${module}.imports")"
+            echo '--- text-patching-sensitive imports ---'
+            grep -E '^(stop_machine|aarch64_insn_patch_text|patch_text|__aarch64_insn_write)' \
+              "${module}.imports" || true
+          done
+
+      - name: Strip debug sections and hash candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          llvm-strip -d /tmp/kernelsu-azhj-kdp.ko
+          llvm-strip -d /tmp/kernelsu-azhj-kdp-no-patch-text.ko
+          sha256sum /tmp/kernelsu-azhj-*.ko
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azhj-kernelsu-candidates
+          path: |
+            /tmp/kernelsu-azhj-kdp.ko
+            /tmp/kernelsu-azhj-kdp-no-patch-text.ko
+            /tmp/kernelsu-azhj-kdp.ko.imports
+            /tmp/kernelsu-azhj-kdp-no-patch-text.ko.imports
