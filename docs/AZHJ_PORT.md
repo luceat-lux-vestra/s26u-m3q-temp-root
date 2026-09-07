@@ -33,21 +33,41 @@ ro.build.version.security_patch=2026-08-05
 The AZHJ target's fail-closed runtime fingerprint is therefore no longer inferred from Samsung's
 naming pattern; it is device-verified.
 
+## Native build gate completed
+
+GitHub Actions built the AZHJ native payloads with Android NDK `29.0.14206865`.
+The build and ELF-format checks passed. Current CI hashes are:
+
+```text
+preload.app.so                09e3267138af97b1e93ac885b412eeca638daefab1c72f7fd77940e69e3b9848
+slide_oracle.app.so           baf803f1973a5611de6d22b41dd00d35f8b33171d7c23c85409390056ed99c9d
+su_daemon_aarch64_pie.app     5614aeece4fe3fb475ade414534336dbd0fdde791a9a52782551925754033c5f
+```
+
+These hashes are build evidence, not release hashes; any source or toolchain change invalidates them.
+
 ## Remaining gate: KernelSU
 
 The Android application path and bundled KernelSU late-load binary are still AZG3-specific.
-The embedded Samsung KDP KernelSU module cannot be assumed reusable as-is because its module
-`vermagic` contains the exact AZG3 kernel release. AZHJ keeps the same `android16-6.12` KMI but
-has a different exact kernel release string, so the embedded module must be rebuilt or audited and
-retargeted before the app may hand off to KernelSU.
+The existing `ksud` is KernelSU v3.2.5/32525 and embeds its `android16-6.12_kernelsu.ko` asset through
+`rust-embed` compression. The asset is therefore not a raw child ELF inside the userspace binary.
+KernelSU's `debug extract-binary` userspace command is the supported non-loading extraction path.
 
-`.github/workflows/azhj-port-audit.yml` performs two reproducible checks on this branch:
+The pinned Root-My-Galaxy Samsung patchset is
+`KernelSU-v3.2.5-samsung-kdp-rkp-defex.patch`. It contains an explicit Linux 6.12 KDP path using
+`kdp_usecount_sub_and_test`, so the source patch is applicable to the AZHJ kernel generation.
 
-1. inspects the existing `ksud` embedded module, prints its `.modinfo` and undefined imports, and
-   creates an audit-only equal-length AZG3->AZHJ release-string retarget for inspection;
-2. builds the AZHJ native exploit payloads with Android NDK 29.
+`.github/workflows/azhj-port-audit.yml` now:
 
-The audit-only patched `ksud` is not a production artifact and is not wired into the app.
+1. audits the existing compressed AZG3 `ksud` container;
+2. builds the AZHJ native exploit payloads with Android NDK 29;
+3. builds two exact-release Android 16 / Linux 6.12 KernelSU candidates from pinned KernelSU v3.2.5
+   plus the pinned Samsung KDP/RKP/DEFEX patchset: the normal Samsung path and a
+   `CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y` variant;
+4. records candidate `vermagic`, `__versions`, undefined imports and text-patching-sensitive imports.
+
+Neither candidate is wired into the Android app until its ABI/import contract is checked against the
+exact AZHJ target and the proven AZG3 module configuration is identified.
 
 ## Build
 
