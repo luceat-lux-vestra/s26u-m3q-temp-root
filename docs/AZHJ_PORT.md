@@ -17,14 +17,37 @@ Target: Korean Galaxy S26 Ultra `SM-S948N` / `m3q`, firmware AP `S948NKSU4AZHJ`.
 - The physical-P0 fingerprint table was regenerated from the exact AZHJ raw kernel Image:
   32 slide candidates x 8 qwords at probe `0x1f0000`, with independent readback verification.
 
-## Deliberately not enabled yet
+## Live identity evidence completed
 
-The Android app and bundled KernelSU late-load binary remain AZG3-specific. This native port does
-not claim KernelSU compatibility with AZHJ and does not alter the existing AZG3 application path.
+Read directly from the AZHJ handset before any ported kernel write:
 
-The full runtime `ro.build.fingerprint` for AZHJ must also be read from the device before wiring
-AZHJ into the app's fail-closed identity gate. The expected Samsung pattern is not treated as
-verified evidence here.
+```text
+ro.build.fingerprint=samsung/m3qksx/m3q:16/BP4A.251205.006/S948NKSU4AZHJ_OKR4AZHJ:user/release-keys
+ro.build.version.incremental=S948NKSU4AZHJ
+ro.product.device=m3q
+uname -r=6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k
+ro.bootimage.build.fingerprint=samsung/m3qksx/qssi_64:16/BP4A.251205.006/S948NKSU4AZHJ:user/test-keys
+ro.build.version.security_patch=2026-08-05
+```
+
+The AZHJ target's fail-closed runtime fingerprint is therefore no longer inferred from Samsung's
+naming pattern; it is device-verified.
+
+## Remaining gate: KernelSU
+
+The Android application path and bundled KernelSU late-load binary are still AZG3-specific.
+The embedded Samsung KDP KernelSU module cannot be assumed reusable as-is because its module
+`vermagic` contains the exact AZG3 kernel release. AZHJ keeps the same `android16-6.12` KMI but
+has a different exact kernel release string, so the embedded module must be rebuilt or audited and
+retargeted before the app may hand off to KernelSU.
+
+`.github/workflows/azhj-port-audit.yml` performs two reproducible checks on this branch:
+
+1. inspects the existing `ksud` embedded module, prints its `.modinfo` and undefined imports, and
+   creates an audit-only equal-length AZG3->AZHJ release-string retarget for inspection;
+2. builds the AZHJ native exploit payloads with Android NDK 29.
+
+The audit-only patched `ksud` is not a production artifact and is not wired into the app.
 
 ## Build
 
