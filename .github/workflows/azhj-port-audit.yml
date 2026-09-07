@@ -83,7 +83,8 @@ jobs:
         run: |
           set -euo pipefail
           cd /work/KernelSU/kernel
-          make clean
+          make -C "$KDIR" M="$PWD" src="$PWD" clean
+          rm -f check_symbol
           CONFIG_KSU=m \
           CONFIG_KSU_SAMSUNG_KDP=y \
           CONFIG_KSU_SAMSUNG_RKP=y \
@@ -96,7 +97,8 @@ jobs:
         run: |
           set -euo pipefail
           cd /work/KernelSU/kernel
-          make clean
+          make -C "$KDIR" M="$PWD" src="$PWD" clean
+          rm -f check_symbol
           CONFIG_KSU=m \
           CONFIG_KSU_SAMSUNG_KDP=y \
           CONFIG_KSU_SAMSUNG_RKP=y \
