@@ -10,41 +10,32 @@ permissions:
   contents: read
 
 jobs:
-  ksud-audit:
+  ksud-container-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Audit embedded KernelSU module
+      - name: Audit compressed KernelSU asset container
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build/azhj-audit
           python3 tools/audit_azhj_ksud.py \
-            --ksud android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp \
-            --old-release '6.12.30-android16-5-pd30ff70-abogkiS948NKSS4AZG3-4k' \
-            --new-release '6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k' \
-            --patched-ksud build/azhj-audit/ksud-m3q-S948NKSU4AZHJ-kdp.audit-only \
-            --patched-module build/azhj-audit/kernelsu-S948NKSU4AZHJ.audit-only.ko \
-            --imports build/azhj-audit/kernelsu-imports.txt
-          echo '--- patched module header ---'
-          readelf -h build/azhj-audit/kernelsu-S948NKSU4AZHJ.audit-only.ko
-          echo '--- patched module .modinfo ---'
-          readelf -p .modinfo build/azhj-audit/kernelsu-S948NKSU4AZHJ.audit-only.ko
-          echo '--- hashes ---'
-          sha256sum \
-            android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp \
-            build/azhj-audit/ksud-m3q-S948NKSU4AZHJ-kdp.audit-only \
-            build/azhj-audit/kernelsu-S948NKSU4AZHJ.audit-only.ko
+            --ksud android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp
+          echo '--- ELF program headers ---'
+          readelf -l android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp
+          echo '--- relevant embedded strings ---'
+          strings -a android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp \
+            | grep -E 'android16-6\.12_kernelsu\.ko|extract-binary|late-load' \
+            | sort -u
 
   native-build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: android-actions/setup-android@v3
       - name: Install Android NDK 29
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null || true
           sdkmanager 'ndk;29.0.14206865'
           echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/29.0.14206865" >> "$GITHUB_ENV"
       - name: Build AZHJ native payloads
