@@ -59,7 +59,8 @@ The pinned Root-My-Galaxy Samsung patchset is
 
 `.github/workflows/azhj-port-audit.yml` now:
 
-1. audits the existing compressed AZG3 `ksud` container;
+1. audits the existing compressed AZG3 `ksud` container and verifies that its expected KMI asset and
+   non-loading extraction CLI are embedded;
 2. builds the AZHJ native exploit payloads with Android NDK 29;
 3. builds two exact-release Android 16 / Linux 6.12 KernelSU candidates from pinned KernelSU v3.2.5
    plus the pinned Samsung KDP/RKP/DEFEX patchset: the normal Samsung path and a
