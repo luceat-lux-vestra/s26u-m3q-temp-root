@@ -49,7 +49,7 @@ $payloadArgs = @(
   "src\targets\$sourceProject\main.c",
   "src\targets\$sourceProject\util.c",
   "src\targets\$sourceProject\slide.c",
-  "src\targets\$sourceProject\fops.c",
+  "src\targets\$project\fops.c",
   "src\targets\$sourceProject\pipe.c",
   'src\faketables.c', 'src\stage3.c',
   "src\targets\$sourceProject\root.c",
