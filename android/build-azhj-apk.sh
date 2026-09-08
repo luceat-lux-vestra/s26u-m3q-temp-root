@@ -119,16 +119,15 @@ assert_hash "$libdir/libm3qksud.so" "$expected_ksud" APK_KSUD_SHA256
 apk_asset="$extract/assets/azhj/kernelsu-azhj-kdp-m3q-compat.ko"
 assert_hash "$apk_asset" "$expected_ko" APK_KSU_ASSET_SHA256
 
-strings -a "$apk_asset" \
-  | grep -Fqx 'vermagic=6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k SMP preempt mod_unload modversions aarch64'
-cat "$extract"/classes*.dex \
-  | grep -aFq 'S948NKSU4AZHJ_OKR4AZHJ:user/release-keys'
-if cat "$extract"/classes*.dex \
-  | grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys'; then
+grep -aFq \
+  'vermagic=6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k SMP preempt mod_unload modversions aarch64' \
+  "$apk_asset"
+grep -aFq 'S948NKSU4AZHJ_OKR4AZHJ:user/release-keys' "$extract"/classes*.dex
+if grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys' "$extract"/classes*.dex; then
   echo 'FAIL: AZG3 exact fingerprint remains in AZHJ classes.dex' >&2
   exit 125
 fi
-cat "$extract"/classes*.dex | grep -aFq 'M3Q_AZHJ_KSU_MODULE_OK:'
+grep -aFq 'M3Q_AZHJ_KSU_MODULE_OK:' "$extract"/classes*.dex
 
 apksigner=$(find "${ANDROID_HOME:-$HOME/Android/Sdk}/build-tools" \
   -type f -name apksigner 2>/dev/null | sort -V | tail -n1 || true)
@@ -142,8 +141,9 @@ if [ -z "$aapt" ]; then
   echo 'FAIL: aapt not found' >&2
   exit 125
 fi
-"$aapt" dump badging "$final_apk" \
-  | grep -Fq "package: name='dev.indevelopment.m3qroot.hardened.azhjpreflight'"
+badging="$work/apk-badging.txt"
+"$aapt" dump badging "$final_apk" > "$badging"
+grep -Fq "package: name='dev.indevelopment.m3qroot.hardened.azhjpreflight'" "$badging"
 "$apksigner" verify --verbose "$final_apk"
 
 apk_hash=$(hash_of "$final_apk")

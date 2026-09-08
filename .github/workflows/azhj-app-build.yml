@@ -113,14 +113,13 @@ jobs:
           work=$(mktemp -d)
           trap 'rm -rf "$work"' EXIT
           unzip -q "$apk" -d "$work"
-          cat "$work"/classes*.dex \
-            | grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys'
-          if cat "$work"/classes*.dex \
-            | grep -aFq 'S948NKSU4AZHJ_OKR4AZHJ:user/release-keys'; then
+          grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys' "$work"/classes*.dex
+          if grep -aFq 'S948NKSU4AZHJ_OKR4AZHJ:user/release-keys' "$work"/classes*.dex; then
             echo 'FAIL: default AZG3 APK unexpectedly contains AZHJ identity' >&2
             exit 125
           fi
-          if unzip -l "$apk" | grep -Fq 'kernelsu-azhj-kdp-m3q-compat.ko'; then
+          unzip -Z1 "$apk" > "$work/apk-list.txt"
+          if grep -Fq 'kernelsu-azhj-kdp-m3q-compat.ko' "$work/apk-list.txt"; then
             echo 'FAIL: default AZG3 APK unexpectedly contains AZHJ KernelSU module' >&2
             exit 125
           fi
