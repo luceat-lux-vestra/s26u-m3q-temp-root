@@ -1,0 +1,162 @@
+name: AZHJ app build
+
+on:
+  push:
+    branches: [azhj-native-port]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  kernelsu-compat:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min@sha256:4dd088dc94b391c926cf09215e0a5958f3dfe7d8eeed3616f9041224f85b1d1a
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+
+      - name: Build exact AZHJ KernelSU compat module
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/build_azhj_kernelsu_compat.sh /tmp/kernelsu-azhj-kdp-m3q-compat.ko
+          test "$(sha256sum /tmp/kernelsu-azhj-kdp-m3q-compat.ko | awk '{print $1}')" = \
+            e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azhj-kernelsu-compat-exact
+          path: /tmp/kernelsu-azhj-kdp-m3q-compat.ko
+          if-no-files-found: error
+          retention-days: 14
+
+  app:
+    needs: kernelsu-compat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+          test "$(git hash-object android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java)" = \
+            76516319bfd3d3a7a03ed308f2dfb791db715f25
+          test "$(git hash-object android/app/build.gradle)" = \
+            f554159032883d83216de48765b3afa713ff4839
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install exact Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'ndk;29.0.14206865'
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: azhj-kernelsu-compat-exact
+          path: ${{ runner.temp }}/azhj-ko
+
+      - name: Verify downloaded KernelSU module
+        shell: bash
+        run: |
+          set -euo pipefail
+          ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
+          test -f "$ko"
+          actual=$(sha256sum "$ko" | awk '{print $1}')
+          echo "AZHJ_KSU_DOWNLOADED_SHA256=$actual"
+          test "$actual" = e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+
+      - name: Regression build unchanged AZG3 app
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./android/build-native.sh
+          (
+            cd android
+            ./gradlew clean :app:assembleRelease
+          )
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          test -f "$apk"
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          unzip -q "$apk" -d "$work"
+          cat "$work"/classes*.dex \
+            | grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys'
+          if cat "$work"/classes*.dex \
+            | grep -aFq 'S948NKSU4AZHJ_OKR4AZHJ:user/release-keys'; then
+            echo 'FAIL: default AZG3 APK unexpectedly contains AZHJ identity' >&2
+            exit 125
+          fi
+          if unzip -l "$apk" | grep -Fq 'kernelsu-azhj-kdp-m3q-compat.ko'; then
+            echo 'FAIL: default AZG3 APK unexpectedly contains AZHJ KernelSU module' >&2
+            exit 125
+          fi
+          test "$(git hash-object android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java)" = \
+            76516319bfd3d3a7a03ed308f2dfb791db715f25
+          test "$(git hash-object android/app/build.gradle)" = \
+            f554159032883d83216de48765b3afa713ff4839
+          echo 'AZG3_APP_REGRESSION_GATE=PASS'
+
+      - name: Build audited AZHJ side-by-side APK
+        shell: bash
+        env:
+          M3Q_REVIEW_HEAD_SHA: ${{ env.REVIEW_HEAD_SHA }}
+        run: |
+          set -euo pipefail
+          android/build-azhj-apk.sh \
+            "$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
+
+      - name: Verify AZHJ overlay restored source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java)" = \
+            76516319bfd3d3a7a03ed308f2dfb791db715f25
+          test "$(git hash-object android/app/build.gradle)" = \
+            f554159032883d83216de48765b3afa713ff4839
+          test ! -e android/app/src/main/java/dev/indevelopment/m3qroot/AzhjKernelSuPreloader.java
+          test ! -e android/app/src/main/assets/azhj/kernelsu-azhj-kdp-m3q-compat.ko
+          echo 'AZHJ_OVERLAY_RESTORE_GATE=PASS'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m3q-root-AZHJ-preflight-unverified
+          path: |
+            android/app/build/outputs/apk/azhj/m3q-root-S948NKSU4AZHJ-preflight-unverified.apk
+            android/app/build/outputs/apk/azhj/AZHJ-BUILD-EVIDENCE.txt
+            android/app/build/outputs/apk/azhj/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
