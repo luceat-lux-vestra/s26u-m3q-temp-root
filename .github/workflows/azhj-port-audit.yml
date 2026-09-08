@@ -49,7 +49,7 @@ jobs:
   kernelsu-candidate-build:
     runs-on: ubuntu-latest
     container:
-      image: ghcr.io/ylarod/ddk-min:android16-6.12-20260313
+      image: ghcr.io/ylarod/ddk-min@sha256:4dd088dc94b391c926cf09215e0a5958f3dfe7d8eeed3616f9041224f85b1d1a
       options: --privileged
     steps:
       - uses: actions/checkout@v4
@@ -216,9 +216,9 @@ jobs:
               | awk -v name="$1" '$8 == name { print $3; found=1 } END { if (!found) exit 1 }'
           }
           test "$(symbol_size ksu_samsung_kdp_put_cred)" -eq 148
-          test "$(symbol_size samsung_kdp_put_cred_many)" -eq 172
-          test "$(symbol_size ksu_samsung_kdp_init)" -eq 268
-          test "$(symbol_size samsung_kdp_commit_worker)" -eq 492
+          test "$(symbol_size samsung_kdp_put_cred_many)" -eq 188
+          test "$(symbol_size ksu_samsung_kdp_init)" -eq 272
+          test "$(symbol_size samsung_kdp_commit_worker)" -eq 488
 
       - name: Strip debug sections and hash candidates
         shell: bash
