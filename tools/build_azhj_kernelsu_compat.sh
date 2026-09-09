@@ -9,6 +9,7 @@ fi
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 out=$1
 release='6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k'
+expected_raw_hash='56b180f244e4eb4b9329dc3fe0d5bc41004bb34a9b6fccce0eefa750ca6e875f'
 expected_hash='e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7'
 # Proven by the raw m3q-compat artifact from AZHJ port-audit run 34293117151,
 # where the same 214-symbol manifest passed pinned KernelSU check_symbol
@@ -23,11 +24,14 @@ command -v llvm-strip >/dev/null
 command -v readelf >/dev/null
 command -v modinfo >/dev/null
 
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+# Keep source paths identical to the proven candidate-build workflow because
+# build-id/debug metadata can encode source paths before the final debug strip.
+scratch=$(mktemp -d)
+ksu=/work/KernelSU
+rmg=/work/rmg
+rm -rf "$ksu" "$rmg"
+trap 'rm -rf "$scratch" "$ksu" "$rmg"' EXIT HUP INT TERM
 
-ksu="$work/KernelSU"
-rmg="$work/rmg"
 git clone -q https://github.com/tiann/KernelSU.git "$ksu"
 git -C "$ksu" checkout -q --detach "$kernelsu_commit"
 git clone -q https://github.com/BuSung-dev/Root-My-Galaxy-Payloads.git "$rmg"
@@ -49,10 +53,6 @@ cd "$ksu/kernel"
 make -C "$KDIR" M="$PWD" src="$PWD" clean
 rm -f check_symbol
 # Reproduce the exact inner Kbuild command used by KernelSU's wrapper Makefile.
-# The wrapper's trailing check_symbol invocation has shown a silent non-zero
-# result when this m3q-compatible candidate is the first build in a fresh
-# source tree. We independently bind the only module-side inputs consumed by
-# that checker (__versions and undefined-symbol names) to a prior PASS below.
 CONFIG_KSU=m \
 CONFIG_KSU_SAMSUNG_KDP=y \
 CONFIG_KSU_SAMSUNG_RKP=y \
@@ -63,16 +63,22 @@ CC=clang make -C "$KDIR" M="$PWD" src="$PWD" \
 module="$PWD/kernelsu.ko"
 test -f "$module"
 
+raw_hash=$(sha256sum "$module" | awk '{print $1}')
+echo "AZHJ_KSU_RAW_SHA256=$raw_hash"
+test "$raw_hash" = "$expected_raw_hash"
+
 vermagic=$(modinfo -F vermagic "$module")
 test "$vermagic" = "$release SMP preempt mod_unload modversions aarch64"
 versions_size=$(readelf -SW "$module" | awk '$2 == "__versions" {print $6}')
+echo "AZHJ_KSU_VERSIONS_SIZE=$versions_size"
 test "$versions_size" = "000000"
-imports="$work/imports.txt"
+imports="$scratch/imports.txt"
 readelf -Ws "$module" \
   | awk '$7 == "UND" && $8 != "" {print $8}' \
   | sort -u > "$imports"
 test "$(wc -l < "$imports")" -eq 214
 imports_sha=$(sha256sum "$imports" | awk '{print $1}')
+echo "AZHJ_KSU_IMPORTS_SHA256=$imports_sha"
 test "$imports_sha" = "$expected_imports_sha"
 test -z "$(grep -E \
   '^(stop_machine|aarch64_insn_patch_text|patch_text|__aarch64_insn_write)' \
@@ -80,29 +86,36 @@ test -z "$(grep -E \
 strings -a "$module" | grep -x 'kdp_usecount_sub_and_test' >/dev/null
 strings -a "$module" | grep -x 'kdp_usecount_dec_and_test' >/dev/null
 
-# Keep the upstream checker as a diagnostic. Its semantic module inputs are
-# already exact-matched above to a reference artifact that passed this checker
-# against the same pinned DDK digest. A direct result is still recorded so any
-# future behavior change remains visible instead of being silently hidden.
 clang tools/check_symbol.c -o check_symbol
 set +e
-./check_symbol "$module" "$KDIR/vmlinux" > "$work/check-symbol.log" 2>&1
+./check_symbol "$module" "$KDIR/vmlinux" > "$scratch/check-symbol.log" 2>&1
 check_symbol_rc=$?
 set -e
-cat "$work/check-symbol.log"
+cat "$scratch/check-symbol.log"
 echo "AZHJ_KSU_DIRECT_CHECK_SYMBOL_RC=$check_symbol_rc"
+test "$check_symbol_rc" -eq 0
 
 symbol_size() {
   readelf -Ws "$module" \
     | awk -v name="$1" '$8 == name {print $3; found=1} END {if (!found) exit 1}'
 }
-test "$(symbol_size ksu_samsung_kdp_put_cred)" -eq 148
-test "$(symbol_size samsung_kdp_put_cred_many)" -eq 188
-test "$(symbol_size ksu_samsung_kdp_init)" -eq 272
-test "$(symbol_size samsung_kdp_commit_worker)" -eq 488
+put_size=$(symbol_size ksu_samsung_kdp_put_cred)
+many_size=$(symbol_size samsung_kdp_put_cred_many)
+init_size=$(symbol_size ksu_samsung_kdp_init)
+worker_size=$(symbol_size samsung_kdp_commit_worker)
+printf '%s\n' \
+  "KSU_SAMSUNG_KDP_PUT_CRED_SIZE=$put_size" \
+  "SAMSUNG_KDP_PUT_CRED_MANY_SIZE=$many_size" \
+  "KSU_SAMSUNG_KDP_INIT_SIZE=$init_size" \
+  "SAMSUNG_KDP_COMMIT_WORKER_SIZE=$worker_size"
+test "$put_size" -eq 148
+test "$many_size" -eq 188
+test "$init_size" -eq 272
+test "$worker_size" -eq 488
 
 llvm-strip -d "$module"
 actual_hash=$(sha256sum "$module" | awk '{print $1}')
+echo "AZHJ_KSU_STRIPPED_SHA256=$actual_hash"
 test "$actual_hash" = "$expected_hash"
 mkdir -p "$(dirname -- "$out")"
 cp "$module" "$out"
@@ -111,9 +124,10 @@ printf '%s\n' \
   "KERNELSU_COMMIT=$kernelsu_commit" \
   "RMG_COMMIT=$rmg_commit" \
   "AZHJ_RELEASE=$release" \
+  "AZHJ_KSU_RAW_SHA256=$raw_hash" \
   "AZHJ_KSU_SHA256=$actual_hash" \
   "AZHJ_KSU_IMPORTS=214" \
   "AZHJ_KSU_IMPORTS_SHA256=$imports_sha" \
-  "AZHJ_KSU_REFERENCE_CHECK_SYMBOL_EQUIVALENCE=PASS" \
+  "AZHJ_KSU_DIRECT_CHECK_SYMBOL=PASS" \
   "AZHJ_KSU_TEXT_PATCH_IMPORTS=0" \
   "AZHJ_KSU_BUILD_GATE=PASS"
