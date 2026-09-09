@@ -171,6 +171,31 @@ replace_exact(
             }
             if (current.ready()) {''',
         ),
+        (
+            '''    private void renderRootState(M3qRootEngine.RootState state) {
+        if (state.terminationUnconfirmed()) {
+            run.setVisibility(View.VISIBLE);
+            setStatus("작업 상태 확인 불가", STATUS_WARNING);
+            setStatusDetail("안전을 위해 기기를 재부팅한 뒤 다시 확인하세요.");
+            run.setText(R.string.run_reboot_check);
+            run.setEnabled(false);
+        } else if (state.ready()) {''',
+            '''    private void renderRootState(M3qRootEngine.RootState state) {
+        if (state.terminationUnconfirmed()) {
+            run.setVisibility(View.VISIBLE);
+            setStatus("작업 상태 확인 불가", STATUS_WARNING);
+            setStatusDetail("안전을 위해 기기를 재부팅한 뒤 다시 확인하세요.");
+            run.setText(R.string.run_reboot_check);
+            run.setEnabled(false);
+        } else if (state.output().contains(
+                "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT")) {
+            run.setVisibility(View.VISIBLE);
+            setStatus("재부팅 필요", STATUS_WARNING);
+            setStatusDetail("KernelSU control은 감지됐지만 현재 boot의 exact foreground receipt가 없습니다.");
+            run.setText(R.string.run_reboot_check);
+            run.setEnabled(false);
+        } else if (state.ready()) {''',
+        ),
     ],
 )
 replace_exact(
@@ -189,20 +214,29 @@ replace_exact(
 
 activity_text = activity.read_text(encoding="utf-8")
 strings_text = strings.read_text(encoding="utf-8")
+dirty_marker = "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
 if "AZG3" in activity_text:
     raise SystemExit("FAIL: stale AZG3 UI text remains in transformed MainActivity")
 if "AZG3 전용" in strings_text:
     raise SystemExit("FAIL: stale AZG3-only UI text remains in transformed strings")
-if activity_text.count(
-    "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
-) != 1:
-    raise SystemExit("FAIL: MainActivity dirty-KSU terminal guard cardinality mismatch")
-if activity_text.index(
-    "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
-) > activity_text.index("if (current.ready())"):
-    raise SystemExit("FAIL: dirty-KSU guard must precede ready/bootstrap routing")
+if activity_text.count(dirty_marker) != 2:
+    raise SystemExit("FAIL: MainActivity dirty-KSU terminal/refresh guard cardinality mismatch")
+if activity_text.index(dirty_marker) > activity_text.index("if (current.ready())"):
+    raise SystemExit("FAIL: dirty-KSU terminal guard must precede ready/bootstrap routing")
+render_start = activity_text.index(
+    "    private void renderRootState(M3qRootEngine.RootState state) {"
+)
+render_end = activity_text.index(
+    "    private void renderDashboard(M3qRootEngine.RootState state) {", render_start
+)
+render_text = activity_text[render_start:render_end]
+if render_text.count(dirty_marker) != 1:
+    raise SystemExit("FAIL: renderRootState dirty-KSU guard cardinality mismatch")
+if render_text.index(dirty_marker) > render_text.index("} else if (state.ready())"):
+    raise SystemExit("FAIL: renderRootState dirty-KSU guard must precede ready/bootstrap routing")
 print("AZHJ_UI_SOURCE_OVERLAY=PASS")
 print("AZHJ_DIRTY_KSU_UI_TERMINAL_GATE=PASS")
+print("AZHJ_DIRTY_KSU_UI_REFRESH_GATE=PASS")
 PY
 
 cp "$preloader_template" "$preloader_dest"
@@ -367,6 +401,7 @@ AZHJ_FOREGROUND_IN_MEMORY_MODULE_GATE=PASS
 AZHJ_NATIVE_HELPER_FOREGROUND_COMPLETION_GATE=PASS
 AZHJ_DIRTY_KSU_REBOOT_REQUIRED_GATE=PASS
 AZHJ_FINAL_PRE_EXPLOIT_STATE_GATE=PASS
+AZHJ_DIRTY_KSU_UI_REFRESH_GATE=PASS
 AZHJ_FOREGROUND_HANDOFF_ARTIFACT_GATE=PASS
 APK_SHA256=$apk_hash
 APK_SIGNATURE_GATE=PASS
