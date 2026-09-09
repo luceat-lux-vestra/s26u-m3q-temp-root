@@ -49,7 +49,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-  ksud-embedded-probe:
+  ksud-embedded:
     needs: kernelsu-compat
     runs-on: ubuntu-latest
     steps:
@@ -87,7 +87,7 @@ jobs:
           set -euo pipefail
           ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
           expected_ko=e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
-          expected_ksud=83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4
+          expected_ksud=4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8
           test "$(sha256sum "$ko" | awk '{print $1}')" = "$expected_ko"
 
           M3Q_KSUD_BUILD_ROOT="$RUNNER_TEMP/ksud-build-a" \
@@ -116,13 +116,13 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: azhj-ksud-foreground-exact
+          name: azhj-ksud-embedded
           path: ${{ runner.temp }}/ksud-azhj-embedded
           if-no-files-found: error
           retention-days: 14
 
   app:
-    needs: [kernelsu-compat, ksud-embedded-probe]
+    needs: [kernelsu-compat, ksud-embedded]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -130,7 +130,7 @@ jobs:
           ref: ${{ env.REVIEW_HEAD_SHA }}
           fetch-depth: 1
 
-      - name: Assert exact review HEAD and foreground source contract
+      - name: Assert exact review HEAD and overlay source contracts
         shell: bash
         run: |
           set -euo pipefail
@@ -143,21 +143,46 @@ jobs:
             76516319bfd3d3a7a03ed308f2dfb791db715f25
           test "$(git hash-object android/app/build.gradle)" = \
             f554159032883d83216de48765b3afa713ff4839
+          test "$(git hash-object android/azhj/AzhjKernelSuPreloader.java)" = \
+            579980e209da724c0fba049f608fd9a884df9377
 
-          preloader=android/azhj/AzhjKernelSuPreloader.java
-          grep -Fq 'SCHEMA=2' "$preloader"
-          grep -Fq 'ROUTE=FOREGROUND_EMBEDDED_LATE_LOAD' "$preloader"
-          grep -Fq 'M3Q_AZHJ_KSU_FOREGROUND_LATE_LOAD_OK' "$preloader"
-          grep -Fq 'M3Q_AZHJ_KSU_READY:' "$preloader"
-          grep -Fq '83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4' "$preloader"
-          grep -Fq 'f13f2a19d4b6b3154af68a42f8bdbc085e5295cc3700d48b25d514f51f074139' "$preloader"
-          for stale in runInsmod PRE_INSMOD INSMOD_RETURNED MODULE_ALIAS KSU_LATE_STAGE; do
-            if grep -Fq "$stale" "$preloader"; then
-              echo "FAIL: stale manual-insmod preloader source remains: $stale" >&2
+          python3 -m py_compile \
+            tools/audit_azhj_ksud.py \
+            tools/patch_azhj_preloader_inmemory.py \
+            tools/prepare_azhj_app.py
+
+          expected_ksud=4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8
+          grep -Fq "$expected_ksud" android/build-azhj-apk.sh
+
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+
+          cp android/azhj/AzhjKernelSuPreloader.java "$tmp/AzhjKernelSuPreloader.java"
+          python3 tools/patch_azhj_preloader_inmemory.py \
+            "$tmp/AzhjKernelSuPreloader.java" "$expected_ksud"
+          grep -Fq "$expected_ksud" "$tmp/AzhjKernelSuPreloader.java"
+          grep -Fq 'KSU_ABSENT_PROVEN' "$tmp/AzhjKernelSuPreloader.java"
+          grep -Fq 'PRE_LATE_LOAD' "$tmp/AzhjKernelSuPreloader.java"
+          for stale in \
+            '.m3q-azhj-embedded-kernelsu.ko' \
+            'extract-binary' \
+            'EMBEDDED_MODULE_VERIFIED' \
+            'verifyEmbeddedModule('; do
+            if grep -Fq "$stale" "$tmp/AzhjKernelSuPreloader.java"; then
+              echo "FAIL: stale filesystem extraction contract remains in transformed preloader: $stale" >&2
               exit 125
             fi
           done
-          echo 'AZHJ_FOREGROUND_PRELOADER_SOURCE_GATE=PASS'
+          echo 'AZHJ_PRELOADER_IN_MEMORY_SOURCE_GATE=PASS'
+
+          cp android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java "$tmp/M3qRootEngine.java"
+          cp android/app/build.gradle "$tmp/build.gradle"
+          python3 tools/prepare_azhj_app.py "$tmp/M3qRootEngine.java" "$tmp/build.gradle"
+          grep -Fq 'M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT' \
+            "$tmp/M3qRootEngine.java"
+          grep -Fq 'RootState preflight = checkRoot(false);' "$tmp/M3qRootEngine.java"
+          grep -Fq 'AZHJ bootstrap root appeared before exploit start' "$tmp/M3qRootEngine.java"
+          echo 'AZHJ_DIRTY_KSU_SOURCE_GATE=PASS'
 
       - uses: actions/setup-java@v4
         with:
@@ -180,7 +205,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: azhj-ksud-foreground-exact
+          name: azhj-ksud-embedded
           path: ${{ runner.temp }}/azhj-ksud
 
       - name: Verify exact downloaded KernelSU artifacts
@@ -196,7 +221,7 @@ jobs:
           echo "AZHJ_KSU_DOWNLOADED_SHA256=$ko_hash"
           echo "AZHJ_FOREGROUND_KSUD_DOWNLOADED_SHA256=$ksud_hash"
           test "$ko_hash" = e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
-          test "$ksud_hash" = 83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4
+          test "$ksud_hash" = 4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8
           python3 tools/audit_azhj_ksud.py --ksud "$ksud"
           echo 'AZHJ_DOWNLOADED_FOREGROUND_ARTIFACT_GATE=PASS'
 

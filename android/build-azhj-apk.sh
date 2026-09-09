@@ -28,7 +28,7 @@ if [ "$actual_head" != "$review_head" ]; then
 fi
 
 expected_ko='e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7'
-expected_ksud='83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4'
+expected_ksud='4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8'
 expected_helper='f13f2a19d4b6b3154af68a42f8bdbc085e5295cc3700d48b25d514f51f074139'
 expected_oracle='00c1d4d577f013e3823cb33998576e17bbb9e2697cc0787efe3a7a95f10f45af'
 expected_payload='0f873301def6b8c834942565e70b0a01f88270e74190dbfd596881c5e6944106'
@@ -103,6 +103,18 @@ trap cleanup EXIT HUP INT TERM
 assert_hash "$native_bin/su_daemon_aarch64_pie.app" "$expected_helper" AZHJ_HELPER_SHA256
 assert_hash "$native_bin/slide_oracle.app.so" "$expected_oracle" AZHJ_ORACLE_SHA256
 assert_hash "$native_bin/preload.app.so" "$expected_payload" AZHJ_PAYLOAD_SHA256
+for marker in \
+  '--m3q-foreground' \
+  'M3Q_AZHJ_KSU_LATE_LOAD_FOREGROUND_RETURNED' \
+  'M3Q_AZHJ_KSU_LATE_LOAD_CONTROL_OK' \
+  'KernelSU control verified version=%u flags=0x%x uapi=%u features=0x%x'
+do
+  if ! grep -aFq -- "$marker" "$native_bin/su_daemon_aarch64_pie.app"; then
+    echo "FAIL: AZHJ native helper foreground contract marker missing: $marker" >&2
+    exit 125
+  fi
+done
+echo 'AZHJ_NATIVE_HELPER_FOREGROUND_COMPLETION_GATE=PASS'
 
 python3 "$repo_root/tools/prepare_azhj_app.py" "$engine" "$gradle_file"
 python3 - "$activity" "$strings_file" <<'PY'
@@ -134,6 +146,31 @@ replace_exact(
             "정확한 SM-S948N AZG3 빌드에서만 실행할 수 있습니다.",
             "정확한 SM-S948N AZHJ 빌드에서만 실행할 수 있습니다.",
         ),
+        (
+            '''            if (current.terminationUnconfirmed()) {
+                finishUnconfirmedRun();
+                return;
+            }
+            if (current.ready()) {''',
+            '''            if (current.terminationUnconfirmed()) {
+                finishUnconfirmedRun();
+                return;
+            }
+            if (current.output().contains(
+                    "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT")) {
+                running.set(false);
+                ui.post(() -> {
+                    run.setVisibility(View.VISIBLE);
+                    run.setEnabled(false);
+                    setStatus("재부팅 필요", STATUS_WARNING);
+                    setStatusDetail("KernelSU control은 감지됐지만 현재 boot의 exact foreground receipt가 없습니다.");
+                    append("dirty/preloaded KernelSU 상태이므로 activation 및 fresh-root를 차단했습니다.");
+                    renderDashboard(current);
+                });
+                return;
+            }
+            if (current.ready()) {''',
+        ),
     ],
 )
 replace_exact(
@@ -156,9 +193,21 @@ if "AZG3" in activity_text:
     raise SystemExit("FAIL: stale AZG3 UI text remains in transformed MainActivity")
 if "AZG3 전용" in strings_text:
     raise SystemExit("FAIL: stale AZG3-only UI text remains in transformed strings")
+if activity_text.count(
+    "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
+) != 1:
+    raise SystemExit("FAIL: MainActivity dirty-KSU terminal guard cardinality mismatch")
+if activity_text.index(
+    "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
+) > activity_text.index("if (current.ready())"):
+    raise SystemExit("FAIL: dirty-KSU guard must precede ready/bootstrap routing")
 print("AZHJ_UI_SOURCE_OVERLAY=PASS")
+print("AZHJ_DIRTY_KSU_UI_TERMINAL_GATE=PASS")
 PY
+
 cp "$preloader_template" "$preloader_dest"
+python3 "$repo_root/tools/patch_azhj_preloader_inmemory.py" \
+  "$preloader_dest" "$expected_ksud"
 
 rm -rf "$jni_dir"
 mkdir -p "$jni_dir"
@@ -193,6 +242,18 @@ python3 "$repo_root/tools/audit_azhj_ksud.py" --ksud "$libdir/libm3qksud.so"
 apk_module="$libdir/libm3qksumodule.so"
 assert_hash "$apk_module" "$expected_ko" APK_KSU_WITNESS_SHA256
 
+for marker in \
+  '--m3q-foreground' \
+  'M3Q_AZHJ_KSU_LATE_LOAD_FOREGROUND_RETURNED' \
+  'M3Q_AZHJ_KSU_LATE_LOAD_CONTROL_OK'
+do
+  if ! grep -aFq -- "$marker" "$libdir/libm3qroot.so"; then
+    echo "FAIL: APK helper foreground completion marker missing: $marker" >&2
+    exit 125
+  fi
+done
+echo 'AZHJ_APK_HELPER_FOREGROUND_COMPLETION_GATE=PASS'
+
 grep -aFq \
   'vermagic=6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k SMP preempt mod_unload modversions aarch64' \
   "$apk_module"
@@ -208,14 +269,13 @@ for marker in \
   'M3Q_AZHJ_DAEMON_KSU_CONTROL_OK' \
   'M3Q_AZHJ_DAEMON_KSU_CONTROL_FAIL:' \
   'KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5' \
-  'M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:' \
   'M3Q_AZHJ_PHASE_RECORDED:' \
   'PRE_LATE_LOAD_CONTROL_PROBE' \
   'KSU_ABSENT_PROVEN' \
-  'EMBEDDED_MODULE_VERIFIED' \
   'PRE_LATE_LOAD' \
   'M3Q_AZHJ_KSU_FOREGROUND_LATE_LOAD_OK' \
   'M3Q_AZHJ_KSU_READY:' \
+  'M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT' \
   'KernelSU 3.2.5 LKM foreground late-load 검증 완료'
 do
   if ! grep -aFq "$marker" "$extract"/classes*.dex; then
@@ -237,10 +297,13 @@ for stale in \
   'M3Q_AZHJ_KSU_MODULE_ALIAS_OK:' \
   'M3Q_AZHJ_KSU_BIND_EXEC_OK' \
   'M3Q_AZHJ_KSU_MODULE_OK:' \
-  'M3Q_AZHJ_KSU_ALREADY_LOADED'
+  'M3Q_AZHJ_KSU_ALREADY_LOADED' \
+  '.m3q-azhj-embedded-kernelsu.ko' \
+  'extract-binary' \
+  'EMBEDDED_MODULE_VERIFIED'
 do
   if grep -aFq "$stale" "$extract"/classes*.dex; then
-    echo "FAIL: stale manual-insmod artifact marker remains: $stale" >&2
+    echo "FAIL: stale AZHJ DEX marker remains: $stale" >&2
     exit 125
   fi
 done
@@ -249,6 +312,8 @@ if grep -aFq 'AZHJ KernelSU module insmod 후 control 검증 실패' "$extract"/
   exit 125
 fi
 echo 'AZHJ_FOREGROUND_HANDOFF_ARTIFACT_GATE=PASS'
+echo 'AZHJ_FOREGROUND_IN_MEMORY_MODULE_GATE=PASS'
+echo 'AZHJ_DIRTY_KSU_REBOOT_REQUIRED_ARTIFACT_GATE=PASS'
 
 grep -aFq '이 앱은 SM-S948N AZHJ 펌웨어에서만 실행할 수 있습니다.' "$extract"/classes*.dex
 grep -aFq '정확한 SM-S948N AZHJ 빌드에서만 실행할 수 있습니다.' "$extract"/classes*.dex
@@ -298,6 +363,10 @@ AZHJ_FOREGROUND_KSUD_SHA256=$expected_ksud
 AZHJ_KSU_WITNESS_SHA256=$expected_ko
 AZHJ_KSU_WITNESS_LIBRARY_GATE=PASS
 AZHJ_FOREGROUND_KSUD_AUDIT_GATE=PASS
+AZHJ_FOREGROUND_IN_MEMORY_MODULE_GATE=PASS
+AZHJ_NATIVE_HELPER_FOREGROUND_COMPLETION_GATE=PASS
+AZHJ_DIRTY_KSU_REBOOT_REQUIRED_GATE=PASS
+AZHJ_FINAL_PRE_EXPLOIT_STATE_GATE=PASS
 AZHJ_FOREGROUND_HANDOFF_ARTIFACT_GATE=PASS
 APK_SHA256=$apk_hash
 APK_SIGNATURE_GATE=PASS

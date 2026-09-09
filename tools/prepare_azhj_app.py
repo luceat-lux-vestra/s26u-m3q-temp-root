@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed, build-time AZHJ overlay for the unchanged AZG3 app source."""
+'''Fail-closed, build-time AZHJ overlay for the unchanged AZG3 app source.'''
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ AZG3_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSS4AZG3-4k"
 AZHJ_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k"
 AZG3_FIRMWARE = "S948NKSS4AZG3_OKR4AZG3"
 AZHJ_FIRMWARE = "S948NKSU4AZHJ_OKR4AZHJ"
+REBOOT_REQUIRED_MARKER = "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
 ACTIVATE_METHOD_START = "    private int activateKernelSu(File helper, File ksud) {"
 ACTIVATE_METHOD_END = "    private void appendKernelSuLog(File helper) {"
 ATTEMPT_METHOD_START = "    boolean markAttemptForThisBoot() {"
@@ -24,9 +25,14 @@ KSU_READY_ANCHOR = '''        if (kernelSu) {
 KSU_READY_OVERLAY = '''        if (kernelSu && hasVerifiedKernelSuThisBoot()) {
             return new RootState(true, false, false, ksuOutput);
         }
-        if (kernelSu && verbose) {
-            log("AZHJ KernelSU control detected without current foreground late-load receipt; "
-                    + "reboot required before retry");
+        if (kernelSu) {
+            if (verbose) {
+                log("AZHJ KernelSU control detected without current foreground late-load receipt; "
+                        + "reboot required before retry");
+            }
+            return new RootState(false, false, false,
+                    "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT\\n"
+                            + ksuOutput);
         }'''
 GRADLE_RELEASE_ANCHOR = '''        release {
             minifyEnabled false
@@ -41,6 +47,30 @@ GRADLE_RELEASE_OVERLAY = '''        release {
 
 AZHJ_ATTEMPT_METHOD = '''    boolean markAttemptForThisBoot() {
         if (bootSettleRemainingMillis() > 0) return false;
+
+        /* Re-check the live state immediately before arming the one-shot receipt.
+         * This closes the UI-confirmation race: a KernelSU control endpoint,
+         * bootstrap root, or uncertain process state appearing after the first
+         * status check must stop the exploit before any kernel write begins. */
+        RootState preflight = checkRoot(false);
+        if (preflight.terminationUnconfirmed()) {
+            log("AZHJ final pre-exploit state probe termination is unconfirmed; reboot required.");
+            return false;
+        }
+        if (preflight.output().contains(
+                "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT")) {
+            log("AZHJ KernelSU control exists without this-boot foreground receipt; reboot required.");
+            return false;
+        }
+        if (preflight.ready()) {
+            log("AZHJ KernelSU is already ready for this boot; refusing a fresh root exploit.");
+            return false;
+        }
+        if (preflight.bootstrap()) {
+            log("AZHJ bootstrap root appeared before exploit start; refusing a second root attempt.");
+            return false;
+        }
+
         synchronized (ATTEMPT_LOCK) {
             String bootId = currentBootId();
             if (bootId.isEmpty()
@@ -295,6 +325,12 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ foreground handoff hook cardinality mismatch")
     if text.count("AZHJ KernelSU control detected without current foreground late-load receipt") != 1:
         raise SystemExit("FAIL: AZHJ reboot-required recovery-state overlay cardinality mismatch")
+    if text.count(REBOOT_REQUIRED_MARKER) != 2:
+        raise SystemExit("FAIL: AZHJ dirty-KSU reboot-required marker cardinality mismatch")
+    if text.count("RootState preflight = checkRoot(false);") != 1:
+        raise SystemExit("FAIL: AZHJ final pre-exploit live-state probe missing")
+    if text.count("AZHJ bootstrap root appeared before exploit start") != 1:
+        raise SystemExit("FAIL: AZHJ pre-exploit bootstrap race guard missing")
     if text.count("KernelSU 3.2.5 LKM foreground late-load 검증 완료") != 1:
         raise SystemExit("FAIL: AZHJ foreground-authoritative ready receipt missing")
     if text.count("M3Q_AZHJ_SAME_BOOT_ACTIVATION_EXISTS:") != 2:
@@ -333,6 +369,8 @@ def main() -> int:
     encoded = text.encode("utf-8")
     args.engine.write_bytes(encoded)
     print(f"ENGINE_AZHJ_SHA256={hashlib.sha256(encoded).hexdigest()}")
+    print("AZHJ_DIRTY_KSU_REBOOT_REQUIRED_GATE=PASS")
+    print("AZHJ_FINAL_PRE_EXPLOIT_STATE_GATE=PASS")
     print("AZHJ_DURABLE_ROOT_ATTEMPT_GUARD_OVERLAY=PASS")
 
     gradle_raw = args.gradle.read_bytes()

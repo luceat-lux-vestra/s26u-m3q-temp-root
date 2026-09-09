@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Fail-closed build overlay for the AZHJ KernelSU preloader.
+'''Fail-closed build overlay for the AZHJ KernelSU preloader.
 
 The reviewed 406 runtime proved that the separate `ksud debug extract-binary`
 probe can fail before the authorized KernelSU write even when the embedded KO
 is correct. The foreground ksud now verifies the exact in-memory bytes passed
 to `load_module()`, so remove the redundant filesystem extraction path from the
 APK build and bind the Java preloader to the exact reviewed foreground ksud.
-"""
+'''
 
 from __future__ import annotations
 
@@ -73,22 +73,59 @@ def main() -> int:
 
     text = replace_exact(
         text,
-        '''    private static final String EMBEDDED_RECEIPT_PREFIX =\n            "M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:";\n''',
+        '''    private static final String EMBEDDED_PROBE_STAGE =
+            "/data/local/tmp/.m3q-azhj-embedded-kernelsu.ko";
+''',
+        "",
+        "obsolete filesystem probe path",
+    )
+
+    text = replace_exact(
+        text,
+        '''    private static final String EMBEDDED_RECEIPT_PREFIX =
+            "M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:";
+''',
         "",
         "obsolete Java embedded receipt constant",
     )
 
     text = replace_exact(
         text,
-        '''        code = recordPhase(context, helper, "KSU_ABSENT_PROVEN");\n        if (code != 0) return code;\n        code = verifyEmbeddedModule(context, helper);\n        if (code != 0) return code;\n        code = recordPhase(context, helper, "EMBEDDED_MODULE_VERIFIED");\n        if (code != 0) return code;\n        code = recordPhase(context, helper, "PRE_LATE_LOAD");\n''',
-        '''        code = recordPhase(context, helper, "KSU_ABSENT_PROVEN");\n        if (code != 0) return code;\n        code = recordPhase(context, helper, "PRE_LATE_LOAD");\n''',
+        '''        code = recordPhase(context, helper, "KSU_ABSENT_PROVEN");
+        if (code != 0) return code;
+        code = verifyEmbeddedModule(context, helper);
+        if (code != 0) return code;
+        code = recordPhase(context, helper, "EMBEDDED_MODULE_VERIFIED");
+        if (code != 0) return code;
+        code = recordPhase(context, helper, "PRE_LATE_LOAD");
+''',
+        '''        code = recordPhase(context, helper, "KSU_ABSENT_PROVEN");
+        if (code != 0) return code;
+        code = recordPhase(context, helper, "PRE_LATE_LOAD");
+''',
         "activation phase transition",
     )
 
     text = replace_exact(
         text,
-        '''        /* This is the single authorized KernelSU kernel-write entry. The native\n         * helper's K protocol returns status 0 only after the custom foreground\n         * ksud has completed embedded-KO late-load and the root-context worker\n         * independently verifies exact KernelSU v32525 control. The successful\n         * K response also causes the bootstrap daemon to unlink its socket and\n         * terminate. Do not issue any post-write bootstrap-daemon command and\n         * do not invoke --ksu-info from the app UID. */\n''',
-        '''        /* This is the single authorized KernelSU kernel-write entry. The custom\n         * foreground ksud first hashes the exact in-memory KO byte slice that is\n         * passed directly to load_module(), and aborts before that write unless\n         * it is the exact audited AZHJ module. The native helper's K protocol then\n         * returns status 0 only after foreground late-load completes and its\n         * root-context worker independently verifies exact KernelSU v32525 control.\n         * The successful K response also causes the bootstrap daemon to unlink its\n         * socket and terminate. Do not issue any post-write bootstrap-daemon command\n         * and do not invoke --ksu-info from the app UID. */\n''',
+        '''        /* This is the single authorized KernelSU kernel-write entry. The native
+         * helper's K protocol returns status 0 only after the custom foreground
+         * ksud has completed embedded-KO late-load and the root-context worker
+         * independently verifies exact KernelSU v32525 control. The successful
+         * K response also causes the bootstrap daemon to unlink its socket and
+         * terminate. Do not issue any post-write bootstrap-daemon command and
+         * do not invoke --ksu-info from the app UID. */
+''',
+        '''        /* This is the single authorized KernelSU kernel-write entry. The custom
+         * foreground ksud first hashes the exact in-memory KO byte slice that is
+         * passed directly to load_module(), and aborts before that write unless
+         * it is the exact audited AZHJ module. The native helper's K protocol then
+         * returns status 0 only after foreground late-load completes and its
+         * root-context worker independently verifies exact KernelSU v32525 control.
+         * The successful K response also causes the bootstrap daemon to unlink its
+         * socket and terminate. Do not issue any post-write bootstrap-daemon command
+         * and do not invoke --ksu-info from the app UID. */
+''',
         "single-write contract comment",
     )
 
@@ -99,41 +136,29 @@ def main() -> int:
         "obsolete filesystem embedded-module verifier",
     )
 
-    # The old probe path is retained only so a successful fresh staging pass can
-    # clean up evidence from earlier 406 runs. It is never created or read by the
-    # new activation path.
     text = replace_exact(
         text,
-        "EMBEDDED_PROBE_STAGE",
-        "LEGACY_EMBEDDED_PROBE_STAGE",
-        "legacy probe cleanup symbol",
-        count=2,
-    )
-    text = replace_exact(
-        text,
-        '''    private static final String LEGACY_EMBEDDED_PROBE_STAGE =\n            "/data/local/tmp/.m3q-azhj-embedded-kernelsu.ko";\n''',
-        '''    /* Cleanup-only path from the superseded 406 filesystem probe. */\n    private static final String LEGACY_EMBEDDED_PROBE_STAGE =\n            "/data/local/tmp/.m3q-azhj-embedded-kernelsu.ko";\n''',
-        "legacy probe cleanup comment",
-    )
-    text = replace_exact(
-        text,
-        '                + "probe_stage=" + shellQuote(LEGACY_EMBEDDED_PROBE_STAGE) + "\\n"\n',
-        '                + "legacy_probe_stage=" + shellQuote(LEGACY_EMBEDDED_PROBE_STAGE) + "\\n"\n',
-        "legacy probe shell variable",
+        '                + "probe_stage=" + shellQuote(EMBEDDED_PROBE_STAGE) + "\\n"\n',
+        "",
+        "obsolete filesystem probe shell variable",
     )
     text = replace_exact(
         text,
         '+ "\\\"$probe_stage\\\" \\\"$late_log\\\" \\\"$journal\\\"\\n"',
-        '+ "\\\"$legacy_probe_stage\\\" \\\"$late_log\\\" \\\"$journal\\\"\\n"',
-        "legacy probe cleanup shell reference",
+        '+ "\\\"$late_log\\\" \\\"$journal\\\"\\n"',
+        "obsolete filesystem probe cleanup reference",
     )
 
-    # Semantic fail-closed audit of the transformed source.
+    # Semantic fail-closed audit of the transformed source. The historical
+    # extraction path must be absent from DEX, not merely dormant.
     forbidden = [
         "verifyEmbeddedModule(",
         "debug extract-binary",
+        "extract-binary",
         "EMBEDDED_MODULE_VERIFIED",
         "EMBEDDED_RECEIPT_PREFIX",
+        "EMBEDDED_PROBE_STAGE",
+        ".m3q-azhj-embedded-kernelsu.ko",
         "M3Q_AZHJ_EMBEDDED_MODULE_HASH_MISMATCH",
     ]
     for token in forbidden:
@@ -146,7 +171,6 @@ def main() -> int:
         "KSU_ABSENT_PROVEN",
         "PRE_LATE_LOAD",
         "ROUTE=FOREGROUND_EMBEDDED_LATE_LOAD",
-        "LEGACY_EMBEDDED_PROBE_STAGE",
         "--late-load",
     ]
     for token in required:

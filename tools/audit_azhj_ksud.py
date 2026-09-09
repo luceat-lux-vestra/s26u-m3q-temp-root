@@ -10,7 +10,8 @@ ELF_MAGIC = b"\x7fELF"
 EM_AARCH64 = 183
 ET_DYN = 3
 LEGACY_KSUD_SHA256 = "3ce5753203c93f4d733fbc10eebd7a69152189afb1d2a15bfd855bd6b5d4f622"
-FOREGROUND_KSUD_SHA256 = "83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4"
+FOREGROUND_KSUD_SHA256 = "4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8"
+AZHJ_KO_SHA256 = "e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7"
 
 
 def sha256(data: bytes) -> str:
@@ -55,22 +56,32 @@ def main() -> int:
         raise SystemExit("ksud is not AArch64 PIE/ET_DYN")
 
     # Both explicitly allowed binaries use KernelSU's compressed embedded asset
-    # container and expose the extraction/late-load commands. The AZHJ custom
-    # binary is additionally required to expose the hidden synchronous barrier.
+    # container and expose the generic debug extraction and late-load commands.
+    # `extract-binary` is merely CLI surface for the foreground candidate; it is
+    # not part of the AZHJ runtime proof path.
     count_and_require(data, b"android16-6.12_kernelsu.ko", "kmi_asset_name")
     count_and_require(data, b"extract-binary", "extract_binary_cli")
     count_and_require(data, b"late-load", "late_load_cli")
 
+    foreground_markers = (
+        b"m3q-foreground",
+        b"M3Q_AZHJ_KSUD_FOREGROUND_LATE_LOAD",
+        b"M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:",
+        AZHJ_KO_SHA256.encode("ascii"),
+        b"M3Q AZHJ KernelSU became loaded before authorized module write",
+    )
     if mode == "azhj-foreground":
-        count_and_require(data, b"m3q-foreground", "m3q_foreground_cli")
-        count_and_require(
-            data,
-            b"M3Q_AZHJ_KSUD_FOREGROUND_LATE_LOAD",
-            "m3q_foreground_runtime_marker",
-        )
+        count_and_require(data, foreground_markers[0], "m3q_foreground_cli")
+        count_and_require(data, foreground_markers[1], "m3q_foreground_runtime_marker")
+        count_and_require(data, foreground_markers[2], "in_memory_module_receipt_marker")
+        count_and_require(data, foreground_markers[3], "exact_in_memory_module_sha")
+        count_and_require(data, foreground_markers[4], "preloaded_kernelsu_rejection_marker")
         print("foreground_completion_barrier=PASS")
+        print("in_memory_module_identity_gate=PASS")
+        print("preloaded_kernelsu_race_gate=PASS")
     else:
-        if b"m3q-foreground" in data or b"M3Q_AZHJ_KSUD_FOREGROUND_LATE_LOAD" in data:
+        unexpected = [marker for marker in foreground_markers if marker in data]
+        if unexpected:
             raise SystemExit("legacy prebuilt unexpectedly contains AZHJ foreground markers")
         print("legacy_prebuilt_container=PASS")
 
@@ -93,8 +104,10 @@ def main() -> int:
         raise SystemExit("unexpected raw child ELF; rust-embed compression assumptions changed")
 
     print("asset_container=rust-embed-compressed")
-    print("module_extraction=ksud_debug_extract-binary_required")
-    if mode == "azhj-foreground":
+    if mode == "legacy-prebuilt":
+        print("module_extraction=ksud_debug_extract-binary_required")
+    else:
+        print("module_identity_proof=actual_load_module_ko_data_sha256")
         print("embedded_module_late_load=PASS")
     print("AZHJ_KSUD_EXACT_HASH_AUDIT=PASS")
     return 0
