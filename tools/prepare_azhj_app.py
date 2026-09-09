@@ -13,7 +13,8 @@ AZG3_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSS4AZG3-4k"
 AZHJ_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k"
 AZG3_FIRMWARE = "S948NKSS4AZG3_OKR4AZG3"
 AZHJ_FIRMWARE = "S948NKSU4AZHJ_OKR4AZHJ"
-ACTIVATE_ANCHOR = '        log("KernelSU loader SHA-256 일치");'
+ACTIVATE_METHOD_START = "    private int activateKernelSu(File helper, File ksud) {"
+ACTIVATE_METHOD_END = "    private void appendKernelSuLog(File helper) {"
 KSU_READY_ANCHOR = '''        if (kernelSu) {
             markKernelSuVerifiedForThisBoot();
             return new RootState(true, false, false, ksuOutput);
@@ -36,36 +37,34 @@ GRADLE_RELEASE_OVERLAY = '''        release {
             signingConfig = signingConfigs.debug
         }'''
 
-MODULE_SHA256 = "e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7"
-KSU_CONTROL_MARKER = "KernelSU control verified version=32525"
+AZHJ_ACTIVATE_METHOD = '''    private int activateKernelSu(File helper, File ksud) {
+        if (!helper.isFile() || !ksud.isFile()) {
+            log("KernelSU loader를 APK에서 찾지 못했습니다.");
+            return 126;
+        }
 
-ACTIVATE_OVERLAY = f'''        RootState moduleState = checkRoot(true);
-        if (moduleState.terminationUnconfirmed()) {{
-            return EXIT_TERMINATION_UNCONFIRMED;
-        }}
-        boolean moduleControlReady = moduleState.output().contains(
-                "{KSU_CONTROL_MARKER}");
-        if (!moduleControlReady) {{
-            int moduleCode = AzhjKernelSuPreloader.ensureLoaded(context, helper, ksud);
-            if (moduleCode != 0) {{
-                log("AZHJ KernelSU module pre-load 실패 code=" + moduleCode);
-                return moduleCode;
-            }}
+        status("KernelSU 활성화 중", STATUS_WORKING);
+        int code = AzhjKernelSuPreloader.activate(context, helper, ksud);
+        if (code == EXIT_TERMINATION_UNCONFIRMED) {
+            log("AZHJ KernelSU daemon handoff 종료 상태를 확인하지 못했습니다.");
+            return code;
+        }
+        if (code != 0) {
+            log("AZHJ KernelSU daemon handoff 실패 code=" + code);
+            appendKernelSuLog(helper);
+            return code;
+        }
 
-            moduleState = checkRoot(true);
-            if (moduleState.terminationUnconfirmed()) {{
-                return EXIT_TERMINATION_UNCONFIRMED;
-            }}
-            if (!moduleState.output().contains("{KSU_CONTROL_MARKER}")) {{
-                log("AZHJ KernelSU module insmod 후 control 검증 실패");
-                return 125;
-            }}
-            log("M3Q_AZHJ_KSU_MODULE_OK:{MODULE_SHA256}");
-        }} else {{
-            log("M3Q_AZHJ_KSU_ALREADY_LOADED");
-        }}
-
-        log("KernelSU loader SHA-256 일치");'''
+        /* AzhjKernelSuPreloader returns 0 only after the bootstrap daemon's
+         * --late-load path has completed and daemon-side exact v32525 control
+         * verification has passed. Only then issue this-boot ready receipt. */
+        if (!markKernelSuVerifiedForThisBoot()) {
+            log("KernelSU는 daemon 검증됐지만 이 boot ID의 영수증을 저장하지 못했습니다.");
+            return 123;
+        }
+        log("KernelSU 3.2.5 LKM late-load daemon 검증 완료");
+        return 0;
+    }'''
 
 
 def git_blob_sha1(data: bytes) -> str:
@@ -80,6 +79,18 @@ def replace_exact(text: str, old: str, new: str, expected_count: int = 1) -> str
             f"FAIL: expected {expected_count} occurrence(s) of {old!r}, found {count}"
         )
     return text.replace(old, new)
+
+
+def replace_region_exact(text: str, start: str, end: str, replacement: str) -> str:
+    if text.count(start) != 1:
+        raise SystemExit(f"FAIL: activation method start cardinality={text.count(start)}")
+    if text.count(end) != 1:
+        raise SystemExit(f"FAIL: activation method end cardinality={text.count(end)}")
+    begin = text.index(start)
+    finish = text.index(end, begin)
+    if finish <= begin:
+        raise SystemExit("FAIL: activation method boundary order invalid")
+    return text[:begin] + replacement + "\n\n" + text[finish:]
 
 
 def main() -> int:
@@ -101,18 +112,24 @@ def main() -> int:
     text = replace_exact(text, AZG3_FIRMWARE, AZHJ_FIRMWARE)
     text = replace_exact(text, "AZG3 root-single", "AZHJ root-single", expected_count=2)
     text = replace_exact(text, KSU_READY_ANCHOR, KSU_READY_OVERLAY)
-    text = replace_exact(text, ACTIVATE_ANCHOR, ACTIVATE_OVERLAY)
+    text = replace_region_exact(
+        text, ACTIVATE_METHOD_START, ACTIVATE_METHOD_END, AZHJ_ACTIVATE_METHOD
+    )
 
     if AZG3_KERNEL in text or AZG3_FIRMWARE in text:
         raise SystemExit("FAIL: stale AZG3 identity remains in transformed engine")
-    if text.count("AzhjKernelSuPreloader.ensureLoaded(context, helper, ksud)") != 1:
-        raise SystemExit("FAIL: AZHJ KernelSU preload hook cardinality mismatch")
+    if text.count("AzhjKernelSuPreloader.activate(context, helper, ksud)") != 1:
+        raise SystemExit("FAIL: AZHJ daemon handoff hook cardinality mismatch")
     if text.count("AZHJ KernelSU control detected without late-load receipt") != 1:
         raise SystemExit("FAIL: AZHJ KernelSU recovery-state overlay cardinality mismatch")
-    if text.count("M3Q_AZHJ_KSU_MODULE_OK:" + MODULE_SHA256) != 1:
-        raise SystemExit("FAIL: AZHJ post-insmod control receipt marker cardinality mismatch")
-    if text.count(KSU_CONTROL_MARKER) < 2:
-        raise SystemExit("FAIL: AZHJ pre/post-insmod control probes are missing")
+    if text.count("KernelSU 3.2.5 LKM late-load daemon 검증 완료") != 1:
+        raise SystemExit("FAIL: AZHJ daemon-authoritative ready receipt missing")
+    if "AzhjKernelSuPreloader.ensureLoaded(" in text:
+        raise SystemExit("FAIL: stale AZHJ preloader sequencing remains")
+    if "KernelSU module insmod 후 control 검증 실패" in text:
+        raise SystemExit("FAIL: stale post-insmod Shizuku control gate remains")
+    if "private int activateKernelSu(File helper, File ksud)" not in text:
+        raise SystemExit("FAIL: transformed activation method missing")
     if "markKernelSuVerifiedForThisBoot();\n            return new RootState(true" in text:
         raise SystemExit("FAIL: AZHJ checkRoot still self-issues a KernelSU ready receipt")
     if AZHJ_KERNEL not in text or AZHJ_FIRMWARE not in text:
