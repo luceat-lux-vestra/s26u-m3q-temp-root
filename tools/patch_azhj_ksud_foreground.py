@@ -51,23 +51,26 @@ def main() -> int:
     cli = require_blob(cli_path, EXPECTED_CLI_BLOB)
     late = require_blob(late_path, EXPECTED_LATE_LOAD_BLOB)
 
+    # Anchor the entire tail of Commands::LateLoad. `package_name` also exists
+    # under Commands::Uninstall, so matching only that field is intentionally
+    # forbidden by the exact-cardinality gate.
     cli = replace_once(
         cli,
-        '''        #[arg(long, default_value_t = String::from("me.weishu.kernelsu"))]\n        package_name: String,\n''',
-        '''        #[arg(long, default_value_t = String::from("me.weishu.kernelsu"))]\n        package_name: String,\n\n        /// M3Q temporary-root handoff: do not daemonize the late-load worker.\n        #[arg(long, hide = true)]\n        m3q_foreground: bool,\n''',
-        "late-load flag",
+        '''        /// Specify kernel KMI version instead of auto-detection\n        #[arg(long)]\n        kmi: Option<String>,\n\n        /// manager package name\n        #[arg(long, default_value_t = String::from("me.weishu.kernelsu"))]\n        package_name: String,\n    },\n\n    /// Emulate system reboot\n''',
+        '''        /// Specify kernel KMI version instead of auto-detection\n        #[arg(long)]\n        kmi: Option<String>,\n\n        /// manager package name\n        #[arg(long, default_value_t = String::from("me.weishu.kernelsu"))]\n        package_name: String,\n\n        /// M3Q temporary-root handoff: do not daemonize the late-load worker.\n        #[arg(long, hide = true)]\n        m3q_foreground: bool,\n    },\n\n    /// Emulate system reboot\n''',
+        "Commands::LateLoad hidden flag",
     )
     cli = replace_once(
         cli,
-        '''            kmi,\n            package_name,\n        } => {\n''',
-        '''            kmi,\n            package_name,\n            m3q_foreground,\n        } => {\n''',
-        "late-load destructure",
+        '''        Commands::LateLoad {\n            magica,\n            allow_shell,\n            post_magica,\n            kmi,\n            package_name,\n        } => {\n''',
+        '''        Commands::LateLoad {\n            magica,\n            allow_shell,\n            post_magica,\n            kmi,\n            package_name,\n            m3q_foreground,\n        } => {\n''',
+        "Commands::LateLoad destructure",
     )
     cli = replace_once(
         cli,
         '''            let result = crate::late_load::run(&package_name, kmi, allow_shell);\n''',
         '''            let result = crate::late_load::run(\n                &package_name, kmi, allow_shell, m3q_foreground,\n            );\n''',
-        "late-load dispatch",
+        "Commands::LateLoad dispatch",
     )
 
     late = replace_once(
