@@ -173,14 +173,14 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ reboot-required recovery-state overlay cardinality mismatch")
     if text.count("KernelSU 3.2.5 LKM foreground late-load 검증 완료") != 1:
         raise SystemExit("FAIL: AZHJ foreground-authoritative ready receipt missing")
-    if text.count("M3Q_AZHJ_SAME_BOOT_ACTIVATION_EXISTS:") != 1:
-        raise SystemExit("FAIL: AZHJ same-boot activation guard missing")
-    if text.count("M3Q_AZHJ_PHASE_JOURNAL_PROVENANCE_INVALID") != 1:
-        raise SystemExit("FAIL: AZHJ journal provenance guard missing")
-    if text.count("M3Q_AZHJ_ACTIVATION_JOURNAL_ABSENT") != 1:
-        raise SystemExit("FAIL: AZHJ journal-absent receipt missing")
-    if text.count("M3Q_AZHJ_PRIOR_BOOT_JOURNAL:") != 1:
-        raise SystemExit("FAIL: AZHJ prior-boot journal receipt missing")
+    if text.count("M3Q_AZHJ_SAME_BOOT_ACTIVATION_EXISTS:") != 2:
+        raise SystemExit("FAIL: AZHJ same-boot activation guard cardinality mismatch")
+    if text.count("M3Q_AZHJ_PHASE_JOURNAL_PROVENANCE_INVALID") != 2:
+        raise SystemExit("FAIL: AZHJ journal provenance guard cardinality mismatch")
+    if text.count("M3Q_AZHJ_ACTIVATION_JOURNAL_ABSENT") != 2:
+        raise SystemExit("FAIL: AZHJ journal-absent receipt cardinality mismatch")
+    if text.count("M3Q_AZHJ_PRIOR_BOOT_JOURNAL:") != 2:
+        raise SystemExit("FAIL: AZHJ prior-boot journal receipt cardinality mismatch")
     if "recover with KernelSU activation only" in text:
         raise SystemExit("FAIL: stale same-boot recovery guidance remains")
     if "KernelSU 3.2.5 LKM late-load daemon 검증 완료" in text:
