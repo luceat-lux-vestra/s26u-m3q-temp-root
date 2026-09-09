@@ -197,8 +197,30 @@ if grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys' "$extract"/classes*.dex;
   echo 'FAIL: AZG3 exact fingerprint remains in AZHJ classes.dex' >&2
   exit 125
 fi
-grep -aFq 'M3Q_AZHJ_KSU_MODULE_OK:' "$extract"/classes*.dex
-grep -aFq 'M3Q_AZHJ_KSU_SOURCE_HASH_MISMATCH:' "$extract"/classes*.dex
+
+for marker in \
+  'M3Q_AZHJ_KSU_BOOTSTRAP_STAGE_OK:' \
+  'M3Q_AZHJ_DAEMON_KSU_CONTROL_OK' \
+  'M3Q_AZHJ_DAEMON_KSU_CONTROL_FAIL:' \
+  'KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5' \
+  'M3Q_AZHJ_KSU_MODULE_ALIAS_OK:' \
+  'M3Q_AZHJ_KSU_BIND_EXEC_OK' \
+  'M3Q_AZHJ_KSU_MODULE_OK:' \
+  'M3Q_AZHJ_KSU_ALREADY_LOADED' \
+  'M3Q_AZHJ_KSU_LATE_LOAD_OK' \
+  'KernelSU 3.2.5 LKM late-load daemon 검증 완료'
+do
+  if ! grep -aFq "$marker" "$extract"/classes*.dex; then
+    echo "FAIL: AZHJ daemon handoff artifact marker missing: $marker" >&2
+    exit 125
+  fi
+done
+if grep -aFq 'AZHJ KernelSU module insmod 후 control 검증 실패' "$extract"/classes*.dex; then
+  echo 'FAIL: stale post-insmod Shizuku control gate remains in AZHJ classes.dex' >&2
+  exit 125
+fi
+echo 'AZHJ_DAEMON_HANDOFF_ARTIFACT_GATE=PASS'
+
 grep -aFq '이 앱은 SM-S948N AZHJ 펌웨어에서만 실행할 수 있습니다.' "$extract"/classes*.dex
 grep -aFq '정확한 SM-S948N AZHJ 빌드에서만 실행할 수 있습니다.' "$extract"/classes*.dex
 if grep -aFq '이 앱은 SM-S948N AZG3 펌웨어에서만 실행할 수 있습니다.' "$extract"/classes*.dex; then
@@ -246,6 +268,7 @@ AZHJ_PAYLOAD_SHA256=$expected_payload
 KSUD_SHA256=$expected_ksud
 AZHJ_KSU_SHA256=$expected_ko
 AZHJ_KSU_NATIVE_LIBRARY_GATE=PASS
+AZHJ_DAEMON_HANDOFF_ARTIFACT_GATE=PASS
 APK_SHA256=$apk_hash
 APK_SIGNATURE_GATE=PASS
 APK_EMBEDDED_HASH_GATE=PASS
