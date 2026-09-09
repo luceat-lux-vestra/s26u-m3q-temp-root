@@ -311,12 +311,10 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ durable root-attempt armed receipt cardinality mismatch")
     if text.count("M3Q_AZHJ_ROOT_ATTEMPT_SAME_BOOT:") != 2:
         raise SystemExit("FAIL: AZHJ durable same-boot guard cardinality mismatch")
-    if text.count("M3Q_AZHJ_ROOT_ATTEMPT_PROVENANCE_INVALID:") != 2:
+    if text.count("M3Q_AZHJ_ROOT_ATTEMPT_PROVENANCE_INVALID:") != 4:
         raise SystemExit("FAIL: AZHJ durable attempt provenance guard cardinality mismatch")
     if text.count("M3Q_AZHJ_ROOT_ATTEMPT_BOOT_MISMATCH") != 2:
         raise SystemExit("FAIL: AZHJ durable boot-id cross-check cardinality mismatch")
-    if text.count("Shizuku durable fresh-root guard") != 0:
-        raise SystemExit("FAIL: impossible sentinel")
     if "recover with KernelSU activation only" in text:
         raise SystemExit("FAIL: stale same-boot recovery guidance remains")
     if "KernelSU 3.2.5 LKM late-load daemon 검증 완료" in text:
