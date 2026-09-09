@@ -81,13 +81,13 @@ jobs:
           name: azhj-kernelsu-compat-exact
           path: ${{ runner.temp }}/azhj-ko
 
-      - name: Prove exact embedded ksud reproducibility
+      - name: Prove exact foreground embedded ksud reproducibility
         shell: bash
         run: |
           set -euo pipefail
           ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
           expected_ko=e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
-          expected_ksud=3b022e75c13bb8fd5e7bd84642fd509983a092ecb675397b55ceb7a912eaa402
+          expected_ksud=83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4
           test "$(sha256sum "$ko" | awk '{print $1}')" = "$expected_ko"
 
           M3Q_KSUD_BUILD_ROOT="$RUNNER_TEMP/ksud-build-a" \
@@ -106,25 +106,23 @@ jobs:
           cmp -s "$RUNNER_TEMP/ksud-azhj-embedded-a" "$RUNNER_TEMP/ksud-azhj-embedded-b"
           echo 'AZHJ_KSUD_EMBEDDED_REPRODUCIBILITY=PASS'
 
-          file "$RUNNER_TEMP/ksud-azhj-embedded-a"
-          grep -aFq 'android16-6.12_kernelsu.ko' "$RUNNER_TEMP/ksud-azhj-embedded-a"
-          grep -aFq 'late-load' "$RUNNER_TEMP/ksud-azhj-embedded-a"
-          grep -aFq 'Load a kernel module with kallsyms access' "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          python3 tools/audit_azhj_ksud.py --ksud "$RUNNER_TEMP/ksud-azhj-embedded-a"
           if strings "$RUNNER_TEMP/ksud-azhj-embedded-a" | grep -Eq '/ksud-build-a|/ksud-build-b-different-absolute-path'; then
             echo 'FAIL: build-root path leaked into ksud binary' >&2
             exit 125
           fi
           cp "$RUNNER_TEMP/ksud-azhj-embedded-a" "$RUNNER_TEMP/ksud-azhj-embedded"
+          echo 'AZHJ_KSUD_FOREGROUND_REPRO_AUDIT=PASS'
 
       - uses: actions/upload-artifact@v4
         with:
-          name: azhj-ksud-embedded-probe
+          name: azhj-ksud-foreground-exact
           path: ${{ runner.temp }}/ksud-azhj-embedded
           if-no-files-found: error
           retention-days: 14
 
   app:
-    needs: kernelsu-compat
+    needs: [kernelsu-compat, ksud-embedded-probe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -132,7 +130,7 @@ jobs:
           ref: ${{ env.REVIEW_HEAD_SHA }}
           fetch-depth: 1
 
-      - name: Assert exact review HEAD
+      - name: Assert exact review HEAD and foreground source contract
         shell: bash
         run: |
           set -euo pipefail
@@ -146,15 +144,20 @@ jobs:
           test "$(git hash-object android/app/build.gradle)" = \
             f554159032883d83216de48765b3afa713ff4839
 
-      - name: Audit exact bundled ksud
-        shell: bash
-        run: |
-          set -euo pipefail
-          ksud=android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp
-          test "$(sha256sum "$ksud" | awk '{print $1}')" = \
-            3ce5753203c93f4d733fbc10eebd7a69152189afb1d2a15bfd855bd6b5d4f622
-          python3 tools/audit_azhj_ksud.py --ksud "$ksud"
-          echo 'AZHJ_EXACT_HEAD_KSUD_AUDIT=PASS'
+          preloader=android/azhj/AzhjKernelSuPreloader.java
+          grep -Fq 'SCHEMA=2' "$preloader"
+          grep -Fq 'ROUTE=FOREGROUND_EMBEDDED_LATE_LOAD' "$preloader"
+          grep -Fq 'M3Q_AZHJ_KSU_FOREGROUND_LATE_LOAD_OK' "$preloader"
+          grep -Fq 'M3Q_AZHJ_KSU_READY:' "$preloader"
+          grep -Fq '83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4' "$preloader"
+          grep -Fq 'f13f2a19d4b6b3154af68a42f8bdbc085e5295cc3700d48b25d514f51f074139' "$preloader"
+          for stale in runInsmod PRE_INSMOD INSMOD_RETURNED MODULE_ALIAS KSU_LATE_STAGE; do
+            if grep -Fq "$stale" "$preloader"; then
+              echo "FAIL: stale manual-insmod preloader source remains: $stale" >&2
+              exit 125
+            fi
+          done
+          echo 'AZHJ_FOREGROUND_PRELOADER_SOURCE_GATE=PASS'
 
       - uses: actions/setup-java@v4
         with:
@@ -175,15 +178,27 @@ jobs:
           name: azhj-kernelsu-compat-exact
           path: ${{ runner.temp }}/azhj-ko
 
-      - name: Verify downloaded KernelSU module
+      - uses: actions/download-artifact@v4
+        with:
+          name: azhj-ksud-foreground-exact
+          path: ${{ runner.temp }}/azhj-ksud
+
+      - name: Verify exact downloaded KernelSU artifacts
         shell: bash
         run: |
           set -euo pipefail
           ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
+          ksud="$RUNNER_TEMP/azhj-ksud/ksud-azhj-embedded"
           test -f "$ko"
-          actual=$(sha256sum "$ko" | awk '{print $1}')
-          echo "AZHJ_KSU_DOWNLOADED_SHA256=$actual"
-          test "$actual" = e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+          test -f "$ksud"
+          ko_hash=$(sha256sum "$ko" | awk '{print $1}')
+          ksud_hash=$(sha256sum "$ksud" | awk '{print $1}')
+          echo "AZHJ_KSU_DOWNLOADED_SHA256=$ko_hash"
+          echo "AZHJ_FOREGROUND_KSUD_DOWNLOADED_SHA256=$ksud_hash"
+          test "$ko_hash" = e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+          test "$ksud_hash" = 83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4
+          python3 tools/audit_azhj_ksud.py --ksud "$ksud"
+          echo 'AZHJ_DOWNLOADED_FOREGROUND_ARTIFACT_GATE=PASS'
 
       - name: Regression build unchanged AZG3 app
         shell: bash
@@ -222,7 +237,8 @@ jobs:
         run: |
           set -euo pipefail
           android/build-azhj-apk.sh \
-            "$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
+            "$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko" \
+            "$RUNNER_TEMP/azhj-ksud/ksud-azhj-embedded"
 
       - name: Verify AZHJ overlay restored source tree
         shell: bash
