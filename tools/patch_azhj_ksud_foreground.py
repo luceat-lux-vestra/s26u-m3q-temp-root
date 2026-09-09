@@ -8,6 +8,8 @@ module load, userspace initialization, and final control verification.
 
 This patch adds a hidden --m3q-foreground flag while preserving the upstream
 default daemonized behavior for every invocation that does not pass that flag.
+For that foreground-only path it also verifies the exact embedded AZHJ module
+bytes in memory immediately before the single load_module kernel-write entry.
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ from pathlib import Path
 
 EXPECTED_CLI_BLOB = "a423158363c65b4be8c5889df6e446e567df8515"
 EXPECTED_LATE_LOAD_BLOB = "0a71aca35b84bfc142f40c3f699ba6da03c1f992"
+EXPECTED_AZHJ_KO_SHA256 = "e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7"
+EXPECTED_AZHJ_KO_NAME = "android16-6.12_kernelsu.ko"
 
 
 def git_blob_sha1(data: bytes) -> str:
@@ -80,6 +84,13 @@ def main() -> int:
         "late-load daemonization",
     )
 
+    late = replace_once(
+        late,
+        '''        let ko_data = assets::get_asset_data(&ko_name)\n            .with_context(|| format!("Failed to get {ko_name} from assets"))?;\n\n        // 4. Load kernelsu.ko from memory with manual relocation\n''',
+        f'''        let ko_data = assets::get_asset_data(&ko_name)\n            .with_context(|| format!("Failed to get {{ko_name}} from assets"))?;\n\n        // M3Q foreground is an exact-device handoff. Verify the bytes that will\n        // be passed directly to load_module; do not rely on a second filesystem\n        // extraction path as proof of the embedded module identity.\n        if m3q_foreground {{\n            const EXPECTED_M3Q_KO_NAME: &str = "{EXPECTED_AZHJ_KO_NAME}";\n            const EXPECTED_M3Q_KO_SHA256: &str = "{EXPECTED_AZHJ_KO_SHA256}";\n            if ko_name != EXPECTED_M3Q_KO_NAME {{\n                anyhow::bail!(\n                    "M3Q AZHJ unexpected embedded module name: {{ko_name}} != {{EXPECTED_M3Q_KO_NAME}}"\n                );\n            }}\n            let ko_sha256 = sha256::digest(ko_data.as_ref());\n            if ko_sha256 != EXPECTED_M3Q_KO_SHA256 {{\n                anyhow::bail!(\n                    "M3Q AZHJ embedded module SHA-256 mismatch: {{ko_sha256}} != {{EXPECTED_M3Q_KO_SHA256}}"\n                );\n            }}\n            println!("M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:{{ko_sha256}}");\n        }}\n\n        // 4. Load kernelsu.ko from memory with manual relocation\n''',
+        "foreground in-memory module identity gate",
+    )
+
     cli_path.write_text(cli, encoding="utf-8")
     late_path.write_text(late, encoding="utf-8")
 
@@ -90,8 +101,14 @@ def main() -> int:
         "cli hidden flag": cli_after.count("m3q_foreground: bool") == 1,
         "cli dispatch": cli_after.count("allow_shell, m3q_foreground") == 1,
         "late foreground marker": late_after.count("M3Q_AZHJ_KSUD_FOREGROUND_LATE_LOAD") == 1,
-        "late conditional": late_after.count("if m3q_foreground") == 1,
+        "late foreground conditions": late_after.count("if m3q_foreground") == 2,
         "stock daemonize retained": late_after.count("utils::daemonize(false)?;") == 1,
+        "exact module name": late_after.count(EXPECTED_AZHJ_KO_NAME) == 1,
+        "exact module sha": late_after.count(EXPECTED_AZHJ_KO_SHA256) == 1,
+        "in-memory module digest": late_after.count("sha256::digest(ko_data.as_ref())") == 1,
+        "in-memory verification receipt": late_after.count("M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:") == 1,
+        "load remains after gate": late_after.index("sha256::digest(ko_data.as_ref())")
+        < late_after.index("ksuinit::load_module(&ko_data, params)"),
     }
     for label, ok in requirements.items():
         if not ok:
@@ -100,6 +117,7 @@ def main() -> int:
     print(f"AZHJ_KSUD_PATCHED_CLI_SHA256={hashlib.sha256(cli_path.read_bytes()).hexdigest()}")
     print(f"AZHJ_KSUD_PATCHED_LATE_LOAD_SHA256={hashlib.sha256(late_path.read_bytes()).hexdigest()}")
     print("AZHJ_KSUD_FOREGROUND_SOURCE_PATCH=PASS")
+    print("AZHJ_KSUD_IN_MEMORY_MODULE_IDENTITY_GATE=PASS")
     return 0
 
 
