@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-  echo "usage: $0 KERNELSU_AZHJ_KO" >&2
+if [ "$#" -ne 2 ]; then
+  echo "usage: $0 KERNELSU_AZHJ_KO AZHJ_FOREGROUND_KSUD" >&2
   exit 2
 fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 ko=$(realpath "$1")
+ksud=$(realpath "$2")
 engine="$script_dir/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java"
 activity="$script_dir/app/src/main/java/dev/indevelopment/m3qroot/MainActivity.java"
 strings_file="$script_dir/app/src/main/res/values/strings.xml"
@@ -18,7 +19,6 @@ preloader_dest="$script_dir/app/src/main/java/dev/indevelopment/m3qroot/AzhjKern
 jni_dir="$script_dir/app/src/main/jniLibs/arm64-v8a"
 native_ko="$jni_dir/libm3qksumodule.so"
 native_bin="$repo_root/exploit/build/m3q-BP4A.251205.006-AZHJ/bin"
-ksud="$script_dir/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp"
 output_dir="$script_dir/app/build/outputs/apk/azhj"
 review_head=${M3Q_REVIEW_HEAD_SHA:?M3Q_REVIEW_HEAD_SHA is required}
 actual_head=$(git -C "$repo_root" rev-parse HEAD)
@@ -28,8 +28,8 @@ if [ "$actual_head" != "$review_head" ]; then
 fi
 
 expected_ko='e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7'
-expected_ksud='3ce5753203c93f4d733fbc10eebd7a69152189afb1d2a15bfd855bd6b5d4f622'
-expected_helper='a3bc95af6b31a988da0f19b4285c20af31735569dd0c9abd64752e26622bc08f'
+expected_ksud='83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4'
+expected_helper='f13f2a19d4b6b3154af68a42f8bdbc085e5295cc3700d48b25d514f51f074139'
 expected_oracle='00c1d4d577f013e3823cb33998576e17bbb9e2697cc0787efe3a7a95f10f45af'
 expected_payload='0f873301def6b8c834942565e70b0a01f88270e74190dbfd596881c5e6944106'
 expected_activity_blob='b7b19c2669408a9de125237fe491928fdc9850db'
@@ -58,7 +58,8 @@ assert_git_blob() {
 }
 
 assert_hash "$ko" "$expected_ko" AZHJ_KSU_INPUT_SHA256
-assert_hash "$ksud" "$expected_ksud" KSUD_SHA256
+assert_hash "$ksud" "$expected_ksud" AZHJ_FOREGROUND_KSUD_INPUT_SHA256
+python3 "$repo_root/tools/audit_azhj_ksud.py" --ksud "$ksud"
 assert_git_blob "$activity" "$expected_activity_blob" MAIN_ACTIVITY_SOURCE_GIT_BLOB_SHA1
 assert_git_blob "$strings_file" "$expected_strings_blob" STRINGS_SOURCE_GIT_BLOB_SHA1
 
@@ -76,7 +77,7 @@ if [ -e "$preloader_dest" ]; then
   exit 125
 fi
 if [ -e "$native_ko" ]; then
-  echo "FAIL: stale AZHJ KernelSU native module already exists: $native_ko" >&2
+  echo "FAIL: stale AZHJ KernelSU native module witness already exists: $native_ko" >&2
   exit 125
 fi
 if [ -d "$jni_dir" ]; then
@@ -165,8 +166,10 @@ cp "$native_bin/su_daemon_aarch64_pie.app" "$jni_dir/libm3qroot.so"
 cp "$native_bin/slide_oracle.app.so" "$jni_dir/libm3qoracle.so"
 cp "$native_bin/preload.app.so" "$jni_dir/libm3qpayload.so"
 cp "$ksud" "$jni_dir/libm3qksud.so"
+# Retain the independently audited KO only as a byte-for-byte witness. Runtime
+# never insmods this standalone file; the custom ksud loads its embedded copy.
 cp "$ko" "$native_ko"
-assert_hash "$native_ko" "$expected_ko" AZHJ_NATIVE_KSU_SHA256
+assert_hash "$native_ko" "$expected_ko" AZHJ_NATIVE_KSU_WITNESS_SHA256
 
 cd "$script_dir"
 ./gradlew clean :app:assembleRelease -x prepareM3qPayloads
@@ -186,8 +189,9 @@ assert_hash "$libdir/libm3qroot.so" "$expected_helper" APK_HELPER_SHA256
 assert_hash "$libdir/libm3qoracle.so" "$expected_oracle" APK_ORACLE_SHA256
 assert_hash "$libdir/libm3qpayload.so" "$expected_payload" APK_PAYLOAD_SHA256
 assert_hash "$libdir/libm3qksud.so" "$expected_ksud" APK_KSUD_SHA256
+python3 "$repo_root/tools/audit_azhj_ksud.py" --ksud "$libdir/libm3qksud.so"
 apk_module="$libdir/libm3qksumodule.so"
-assert_hash "$apk_module" "$expected_ko" APK_KSU_NATIVE_SHA256
+assert_hash "$apk_module" "$expected_ko" APK_KSU_WITNESS_SHA256
 
 grep -aFq \
   'vermagic=6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k SMP preempt mod_unload modversions aarch64' \
@@ -199,19 +203,44 @@ if grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys' "$extract"/classes*.dex;
 fi
 
 for marker in \
+  'SCHEMA=2' \
   'M3Q_AZHJ_KSU_BOOTSTRAP_STAGE_OK:' \
   'M3Q_AZHJ_DAEMON_KSU_CONTROL_OK' \
   'M3Q_AZHJ_DAEMON_KSU_CONTROL_FAIL:' \
   'KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5' \
+  'M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:' \
+  'M3Q_AZHJ_PHASE_RECORDED:' \
+  'PRE_LATE_LOAD_CONTROL_PROBE' \
+  'KSU_ABSENT_PROVEN' \
+  'EMBEDDED_MODULE_VERIFIED' \
+  'PRE_LATE_LOAD' \
+  'M3Q_AZHJ_KSU_FOREGROUND_LATE_LOAD_OK' \
+  'M3Q_AZHJ_KSU_READY:' \
+  'KernelSU 3.2.5 LKM foreground late-load 검증 완료'
+do
+  if ! grep -aFq "$marker" "$extract"/classes*.dex; then
+    echo "FAIL: AZHJ foreground handoff artifact marker missing: $marker" >&2
+    exit 125
+  fi
+done
+
+for stale in \
+  'PRE_INSMOD_CONTROL_PROBE' \
+  'KSU_READY_AFTER_STAGE' \
+  'PRE_INSMOD' \
+  'MODULE_ALIAS_OK' \
+  'INSMOD_CALL_BEGIN' \
+  'INSMOD_RETURNED' \
+  'INSMOD_RECEIPT_OK' \
+  'POST_INSMOD_CONTROL_PROBE' \
+  'POST_INSMOD_CONTROL_READY' \
   'M3Q_AZHJ_KSU_MODULE_ALIAS_OK:' \
   'M3Q_AZHJ_KSU_BIND_EXEC_OK' \
   'M3Q_AZHJ_KSU_MODULE_OK:' \
-  'M3Q_AZHJ_KSU_ALREADY_LOADED' \
-  'M3Q_AZHJ_KSU_LATE_LOAD_OK' \
-  'KernelSU 3.2.5 LKM late-load daemon 검증 완료'
+  'M3Q_AZHJ_KSU_ALREADY_LOADED'
 do
-  if ! grep -aFq "$marker" "$extract"/classes*.dex; then
-    echo "FAIL: AZHJ daemon handoff artifact marker missing: $marker" >&2
+  if grep -aFq "$stale" "$extract"/classes*.dex; then
+    echo "FAIL: stale manual-insmod artifact marker remains: $stale" >&2
     exit 125
   fi
 done
@@ -219,7 +248,7 @@ if grep -aFq 'AZHJ KernelSU module insmod 후 control 검증 실패' "$extract"/
   echo 'FAIL: stale post-insmod Shizuku control gate remains in AZHJ classes.dex' >&2
   exit 125
 fi
-echo 'AZHJ_DAEMON_HANDOFF_ARTIFACT_GATE=PASS'
+echo 'AZHJ_FOREGROUND_HANDOFF_ARTIFACT_GATE=PASS'
 
 grep -aFq '이 앱은 SM-S948N AZHJ 펌웨어에서만 실행할 수 있습니다.' "$extract"/classes*.dex
 grep -aFq '정확한 SM-S948N AZHJ 빌드에서만 실행할 수 있습니다.' "$extract"/classes*.dex
@@ -265,10 +294,11 @@ APK_APPLICATION_ID=dev.indevelopment.m3qroot.hardened.azhjpreflight
 AZHJ_HELPER_SHA256=$expected_helper
 AZHJ_ORACLE_SHA256=$expected_oracle
 AZHJ_PAYLOAD_SHA256=$expected_payload
-KSUD_SHA256=$expected_ksud
-AZHJ_KSU_SHA256=$expected_ko
-AZHJ_KSU_NATIVE_LIBRARY_GATE=PASS
-AZHJ_DAEMON_HANDOFF_ARTIFACT_GATE=PASS
+AZHJ_FOREGROUND_KSUD_SHA256=$expected_ksud
+AZHJ_KSU_WITNESS_SHA256=$expected_ko
+AZHJ_KSU_WITNESS_LIBRARY_GATE=PASS
+AZHJ_FOREGROUND_KSUD_AUDIT_GATE=PASS
+AZHJ_FOREGROUND_HANDOFF_ARTIFACT_GATE=PASS
 APK_SHA256=$apk_hash
 APK_SIGNATURE_GATE=PASS
 APK_EMBEDDED_HASH_GATE=PASS
