@@ -78,6 +78,19 @@ export "AR_${target//-/_}=$llvm_bin/llvm-ar"
 export "CARGO_TARGET_${uutriple}_LINKER=$clang_path"
 export "BINDGEN_EXTRA_CLANG_ARGS_${target//-/_}=--sysroot=$llvm_path/sysroot -I$llvm_path/sysroot/usr/include/$target"
 
+# Normalize every build-root-dependent input that can reach rustc/linker output.
+# The adversarial CI builds from two deliberately different absolute roots and
+# requires byte-for-byte identity, so this remap must remain effective rather
+# than replacing that gate with a fixed checkout path.
+source_date_epoch=$(git -C "$ksu" show -s --format=%ct "$kernelsu_commit")
+export SOURCE_DATE_EPOCH="$source_date_epoch"
+export TZ=UTC
+export LC_ALL=C
+export CARGO_INCREMENTAL=0
+export RUSTFLAGS="--remap-path-prefix=$work=/m3q/ksud-build"
+echo "AZHJ_KSUD_SOURCE_DATE_EPOCH=$SOURCE_DATE_EPOCH"
+echo "AZHJ_KSUD_PATH_REMAP=$work=/m3q/ksud-build"
+
 # Cargo.lock pins registry/git dependency revisions. Rust, NDK, target and API
 # are pinned above. M3Q_KSUD_BUILD_ROOT lets CI prove the output is independent
 # of the absolute checkout/target path by building in two distinct roots.
