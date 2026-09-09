@@ -86,6 +86,13 @@ def main() -> int:
 
     late = replace_once(
         late,
+        '''    if ksuinit::has_kernelsu() {\n        info!("KernelSU already loaded, skip loading ko");\n    } else {\n''',
+        '''    if ksuinit::has_kernelsu() {\n        if m3q_foreground {\n            anyhow::bail!("M3Q AZHJ KernelSU became loaded before authorized module write");\n        }\n        info!("KernelSU already loaded, skip loading ko");\n    } else {\n''',
+        "foreground preloaded-KernelSU race gate",
+    )
+
+    late = replace_once(
+        late,
         '''        let ko_data = assets::get_asset_data(&ko_name)\n            .with_context(|| format!("Failed to get {ko_name} from assets"))?;\n\n        // 4. Load kernelsu.ko from memory with manual relocation\n''',
         f'''        let ko_data = assets::get_asset_data(&ko_name)\n            .with_context(|| format!("Failed to get {{ko_name}} from assets"))?;\n\n        // M3Q foreground is an exact-device handoff. Verify the bytes that will\n        // be passed directly to load_module; do not rely on a second filesystem\n        // extraction path as proof of the embedded module identity.\n        if m3q_foreground {{\n            const EXPECTED_M3Q_KO_NAME: &str = "{EXPECTED_AZHJ_KO_NAME}";\n            const EXPECTED_M3Q_KO_SHA256: &str = "{EXPECTED_AZHJ_KO_SHA256}";\n            if ko_name != EXPECTED_M3Q_KO_NAME {{\n                anyhow::bail!(\n                    "M3Q AZHJ unexpected embedded module name: {{ko_name}} != {{EXPECTED_M3Q_KO_NAME}}"\n                );\n            }}\n            let ko_sha256 = sha256::digest(ko_data.as_ref());\n            if ko_sha256 != EXPECTED_M3Q_KO_SHA256 {{\n                anyhow::bail!(\n                    "M3Q AZHJ embedded module SHA-256 mismatch: {{ko_sha256}} != {{EXPECTED_M3Q_KO_SHA256}}"\n                );\n            }}\n            {{\n                use std::io::Write;\n                let mut stderr = std::io::stderr().lock();\n                writeln!(stderr, "M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:{{ko_sha256}}")?;\n                stderr.flush()?;\n            }}\n        }}\n\n        // 4. Load kernelsu.ko from memory with manual relocation\n''',
         "foreground in-memory module identity gate",
@@ -101,8 +108,11 @@ def main() -> int:
         "cli hidden flag": cli_after.count("m3q_foreground: bool") == 1,
         "cli dispatch": cli_after.count("allow_shell, m3q_foreground") == 1,
         "late foreground marker": late_after.count("M3Q_AZHJ_KSUD_FOREGROUND_LATE_LOAD") == 1,
-        "late foreground conditions": late_after.count("if m3q_foreground") == 2,
+        "late foreground conditions": late_after.count("if m3q_foreground") == 3,
         "stock daemonize retained": late_after.count("utils::daemonize(false)?;") == 1,
+        "preloaded race rejection": late_after.count(
+            "M3Q AZHJ KernelSU became loaded before authorized module write"
+        ) == 1,
         "exact module name": late_after.count(EXPECTED_AZHJ_KO_NAME) == 1,
         "exact module sha": late_after.count(EXPECTED_AZHJ_KO_SHA256) == 1,
         "in-memory module digest": late_after.count("sha256::digest(ko_data.as_ref())") == 1,
@@ -119,6 +129,7 @@ def main() -> int:
     print(f"AZHJ_KSUD_PATCHED_LATE_LOAD_SHA256={hashlib.sha256(late_path.read_bytes()).hexdigest()}")
     print("AZHJ_KSUD_FOREGROUND_SOURCE_PATCH=PASS")
     print("AZHJ_KSUD_IN_MEMORY_MODULE_IDENTITY_GATE=PASS")
+    print("AZHJ_KSUD_PRELOADED_RACE_GATE=PASS")
     return 0
 
 
