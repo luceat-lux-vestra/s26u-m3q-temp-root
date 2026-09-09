@@ -7,12 +7,13 @@ if [ "$#" -ne 2 ]; then
 fi
 
 ko=$(realpath "$1")
-out=$2
+out=$(realpath -m "$2")
 expected_ko='e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7'
 kernelsu_commit='b0bc817b4e966aa6aa830834eaf6ef765d821d40'
 rust_toolchain='1.96.0'
 target='aarch64-linux-android'
 android_api='26'
+expected_ndk_revision='29.0.14206865'
 
 : "${ANDROID_NDK_HOME:?ANDROID_NDK_HOME must point to Android NDK 29.0.14206865}"
 command -v git >/dev/null
@@ -20,17 +21,37 @@ command -v rustup >/dev/null
 command -v cargo >/dev/null
 command -v sha256sum >/dev/null
 
+source_properties="$ANDROID_NDK_HOME/source.properties"
+test -f "$source_properties"
+ndk_revision=$(sed -n 's/^Pkg.Revision[[:space:]]*=[[:space:]]*//p' "$source_properties" | head -n1)
+echo "AZHJ_KSUD_NDK_REVISION=$ndk_revision"
+test "$ndk_revision" = "$expected_ndk_revision"
+
 actual_ko=$(sha256sum "$ko" | awk '{print $1}')
 echo "AZHJ_KSUD_EMBED_INPUT_KO_SHA256=$actual_ko"
 test "$actual_ko" = "$expected_ko"
 
-work=$(mktemp -d)
+if [ -n "${M3Q_KSUD_BUILD_ROOT:-}" ]; then
+  work=$(realpath -m "$M3Q_KSUD_BUILD_ROOT")
+  rm -rf -- "$work"
+  mkdir -p -- "$work"
+  cleanup_work=0
+else
+  work=$(mktemp -d)
+  cleanup_work=1
+fi
 ksu="$work/KernelSU"
-trap 'rm -rf "$work"' EXIT HUP INT TERM
+cleanup() {
+  if [ "$cleanup_work" -eq 1 ]; then
+    rm -rf -- "$work"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
 
 git clone -q https://github.com/tiann/KernelSU.git "$ksu"
 git -C "$ksu" checkout -q --detach "$kernelsu_commit"
 test "$(git -C "$ksu" rev-parse HEAD)" = "$kernelsu_commit"
+test -z "$(git -C "$ksu" status --porcelain)"
 
 asset="$ksu/userspace/ksud/bin/aarch64/android16-6.12_kernelsu.ko"
 cp "$ko" "$asset"
@@ -57,9 +78,9 @@ export "AR_${target//-/_}=$llvm_bin/llvm-ar"
 export "CARGO_TARGET_${uutriple}_LINKER=$clang_path"
 export "BINDGEN_EXTRA_CLANG_ARGS_${target//-/_}=--sysroot=$llvm_path/sysroot -I$llvm_path/sysroot/usr/include/$target"
 
-# Keep the source checkout and Cargo target directory under the same temporary
-# root for this build. Cargo.lock pins all registry/git dependency revisions;
-# the Rust and NDK toolchains are pinned by this script/workflow.
+# Cargo.lock pins registry/git dependency revisions. Rust, NDK, target and API
+# are pinned above. M3Q_KSUD_BUILD_ROOT lets CI prove the output is independent
+# of the absolute checkout/target path by building in two distinct roots.
 CARGO_TARGET_DIR="$work/target" \
   cargo "+$rust_toolchain" build \
   --locked \
