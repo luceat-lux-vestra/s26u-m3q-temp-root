@@ -165,7 +165,11 @@ APK_EMBEDDED_HASH_GATE=PASS
 AZHJ_IDENTITY_OVERLAY_GATE=PASS
 AZHJ_RUNTIME_KERNEL_WRITE=UNVERIFIED_FAIL
 EVIDENCE
-sha256sum "$final_apk" > "$output_dir/SHA256SUMS"
+(
+  cd "$output_dir"
+  sha256sum "$(basename "$final_apk")" > SHA256SUMS
+  sha256sum -c SHA256SUMS
+)
 cat "$output_dir/AZHJ-BUILD-EVIDENCE.txt"
 cat "$output_dir/SHA256SUMS"
 echo "AZHJ_APK=$final_apk"
