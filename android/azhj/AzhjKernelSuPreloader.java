@@ -96,17 +96,11 @@ final class AzhjKernelSuPreloader {
             return 125;
         }
 
-        ProbeResult direct = probeDirectControl(context, helper);
-        if (direct.kind == ProbeKind.READY) {
-            Log.e(TAG, "KernelSU already loaded before AZHJ activation; reboot required");
-            return EXIT_REBOOT_REQUIRED;
-        }
-        if (direct.kind != ProbeKind.ABSENT) {
-            Log.e(TAG, "direct KernelSU pre-probe did not prove absence code="
-                    + direct.code + " output=" + direct.output);
-            return direct.code != 0 ? direct.code : 125;
-        }
-
+        /* Do not invoke --ksu-info directly from an untrusted_app child here.
+         * KernelSU driver discovery uses the reboot magic syscall, which Samsung
+         * seccomp may kill before KernelSU's always-allow GET_INFO permission
+         * check is reached. All pre-write control discovery therefore runs in
+         * the already-rooted bootstrap daemon context. */
         int code = stageBootstrapAssets(context, helper, ksud, moduleWitness);
         if (code != 0) return code;
 
@@ -115,7 +109,7 @@ final class AzhjKernelSuPreloader {
 
         ProbeResult daemon = probeDaemonControl(context, helper);
         if (daemon.kind == ProbeKind.READY) {
-            Log.e(TAG, "KernelSU became ready before authorized late-load; reboot required");
+            Log.e(TAG, "KernelSU already ready before authorized late-load; reboot required");
             return EXIT_REBOOT_REQUIRED;
         }
         if (daemon.kind != ProbeKind.ABSENT) {
@@ -134,10 +128,12 @@ final class AzhjKernelSuPreloader {
         if (code != 0) return code;
 
         /* This is the single authorized KernelSU kernel-write entry. The native
-         * helper invokes the custom ksud with --m3q-foreground and returns 0
-         * only after that same ksud process completes late-load and the helper
-         * independently verifies exact KernelSU v32525 control. Do not call the
-         * bootstrap daemon again after this boundary. */
+         * helper's K protocol returns status 0 only after the custom foreground
+         * ksud has completed embedded-KO late-load and the root-context worker
+         * independently verifies exact KernelSU v32525 control. The successful
+         * K response also causes the bootstrap daemon to unlink its socket and
+         * terminate. Do not issue any post-write bootstrap-daemon command and
+         * do not invoke --ksu-info from the app UID. */
         CommandResult late = runDirect(
                 context,
                 new String[]{helper.getAbsolutePath(), "--late-load"},
@@ -145,13 +141,6 @@ final class AzhjKernelSuPreloader {
         Log.i(TAG, "AZHJ KernelSU foreground late-load code=" + late.code
                 + " output=" + late.output);
         if (late.code != 0) return late.code;
-
-        ProbeResult finalProbe = probeDirectControl(context, helper);
-        if (finalProbe.kind != ProbeKind.READY) {
-            Log.e(TAG, "foreground late-load returned without exact final KernelSU control code="
-                    + finalProbe.code + " output=" + finalProbe.output);
-            return finalProbe.code != 0 ? finalProbe.code : 125;
-        }
 
         Log.i(TAG, "M3Q_AZHJ_KSU_FOREGROUND_LATE_LOAD_OK");
         Log.i(TAG, "M3Q_AZHJ_KSU_READY:" + CONTROL_EXACT_LINE);
@@ -288,15 +277,6 @@ final class AzhjKernelSuPreloader {
         return 0;
     }
 
-    private static ProbeResult probeDirectControl(Context context, File helper) {
-        CommandResult result = runDirect(
-                context,
-                new String[]{helper.getAbsolutePath(), "--ksu-info"},
-                TIMEOUT_CONTROL_SECONDS);
-        Log.i(TAG, "AZHJ direct control probe code=" + result.code + " output=" + result.output);
-        return classifyControl(result.code, result.output);
-    }
-
     private static ProbeResult probeDaemonControl(Context context, File helper) {
         String command = "set -u\n"
                 + "helper_stage=" + shellQuote(HELPER_STAGE) + "\n"
@@ -329,16 +309,6 @@ final class AzhjKernelSuPreloader {
             return new ProbeResult(ProbeKind.ABSENT, 13, result.output);
         }
         return new ProbeResult(ProbeKind.FAIL, 125, result.output);
-    }
-
-    private static ProbeResult classifyControl(int code, String output) {
-        if (code == 0 && output.contains(CONTROL_EXACT_LINE)) {
-            return new ProbeResult(ProbeKind.READY, 0, output);
-        }
-        if (code == 13 && output.contains("KernelSU driver fd unavailable")) {
-            return new ProbeResult(ProbeKind.ABSENT, 13, output);
-        }
-        return new ProbeResult(ProbeKind.FAIL, code != 0 ? code : 125, output);
     }
 
     private static CommandResult runRootCommand(
