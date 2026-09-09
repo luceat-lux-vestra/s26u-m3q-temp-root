@@ -50,6 +50,17 @@ def main() -> int:
     count_and_require(data, b"android16-6.12_kernelsu.ko", "kmi_asset_name")
     count_and_require(data, b"extract-binary", "extract_binary_cli")
 
+    # The AZHJ app intentionally supplies an externally audited module through
+    # `ksud insmod` before invoking the legacy late-load flow. Bind that
+    # handoff to the exact bundled userspace binary rather than inferring CLI
+    # support from upstream source alone.
+    count_and_require(data, b"insmod", "insmod_cli")
+    count_and_require(
+        data,
+        b"Load a kernel module with kallsyms access",
+        "insmod_help",
+    )
+
     old_release = b"6.12.30-android16-5-pd30ff70-abogkiS948NKSS4AZG3-4k"
     old_release_count = data.count(old_release)
     print(f"old_release_plaintext_occurrences={old_release_count}")
@@ -70,6 +81,7 @@ def main() -> int:
 
     print("asset_container=rust-embed-compressed")
     print("module_extraction=ksud_debug_extract-binary_required")
+    print("external_module_insmod=PASS")
     return 0
 
 
