@@ -14,8 +14,7 @@ gradle_file="$script_dir/app/build.gradle"
 preloader_template="$script_dir/azhj/AzhjKernelSuPreloader.java"
 preloader_dest="$script_dir/app/src/main/java/dev/indevelopment/m3qroot/AzhjKernelSuPreloader.java"
 jni_dir="$script_dir/app/src/main/jniLibs/arm64-v8a"
-asset_dir="$script_dir/app/src/main/assets/azhj"
-asset_ko="$asset_dir/kernelsu-azhj-kdp-m3q-compat.ko"
+native_ko="$jni_dir/libm3qksumodule.so"
 native_bin="$repo_root/exploit/build/m3q-BP4A.251205.006-AZHJ/bin"
 ksud="$script_dir/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp"
 output_dir="$script_dir/app/build/outputs/apk/azhj"
@@ -56,11 +55,12 @@ if [ -e "$preloader_dest" ]; then
   echo "FAIL: AZHJ overlay destination already exists: $preloader_dest" >&2
   exit 125
 fi
+if [ -e "$native_ko" ]; then
+  echo "FAIL: stale AZHJ KernelSU native module already exists: $native_ko" >&2
+  exit 125
+fi
 if [ -d "$jni_dir" ]; then
   cp -a "$jni_dir" "$work/jni-backup"
-fi
-if [ -e "$script_dir/app/src/main/assets" ]; then
-  cp -a "$script_dir/app/src/main/assets" "$work/assets-backup"
 fi
 
 cleanup() {
@@ -71,10 +71,6 @@ cleanup() {
   if [ -d "$work/jni-backup" ]; then
     mkdir -p "$(dirname -- "$jni_dir")"
     cp -a "$work/jni-backup" "$jni_dir"
-  fi
-  rm -rf "$script_dir/app/src/main/assets"
-  if [ -d "$work/assets-backup" ]; then
-    cp -a "$work/assets-backup" "$script_dir/app/src/main/assets"
   fi
   rm -rf "$work"
 }
@@ -94,9 +90,8 @@ cp "$native_bin/su_daemon_aarch64_pie.app" "$jni_dir/libm3qroot.so"
 cp "$native_bin/slide_oracle.app.so" "$jni_dir/libm3qoracle.so"
 cp "$native_bin/preload.app.so" "$jni_dir/libm3qpayload.so"
 cp "$ksud" "$jni_dir/libm3qksud.so"
-mkdir -p "$asset_dir"
-cp "$ko" "$asset_ko"
-assert_hash "$asset_ko" "$expected_ko" AZHJ_ASSET_KSU_SHA256
+cp "$ko" "$native_ko"
+assert_hash "$native_ko" "$expected_ko" AZHJ_NATIVE_KSU_SHA256
 
 cd "$script_dir"
 ./gradlew clean :app:assembleRelease -x prepareM3qPayloads
@@ -116,18 +111,19 @@ assert_hash "$libdir/libm3qroot.so" "$expected_helper" APK_HELPER_SHA256
 assert_hash "$libdir/libm3qoracle.so" "$expected_oracle" APK_ORACLE_SHA256
 assert_hash "$libdir/libm3qpayload.so" "$expected_payload" APK_PAYLOAD_SHA256
 assert_hash "$libdir/libm3qksud.so" "$expected_ksud" APK_KSUD_SHA256
-apk_asset="$extract/assets/azhj/kernelsu-azhj-kdp-m3q-compat.ko"
-assert_hash "$apk_asset" "$expected_ko" APK_KSU_ASSET_SHA256
+apk_module="$libdir/libm3qksumodule.so"
+assert_hash "$apk_module" "$expected_ko" APK_KSU_NATIVE_SHA256
 
 grep -aFq \
   'vermagic=6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k SMP preempt mod_unload modversions aarch64' \
-  "$apk_asset"
+  "$apk_module"
 grep -aFq 'S948NKSU4AZHJ_OKR4AZHJ:user/release-keys' "$extract"/classes*.dex
 if grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys' "$extract"/classes*.dex; then
   echo 'FAIL: AZG3 exact fingerprint remains in AZHJ classes.dex' >&2
   exit 125
 fi
 grep -aFq 'M3Q_AZHJ_KSU_MODULE_OK:' "$extract"/classes*.dex
+grep -aFq 'M3Q_AZHJ_KSU_SOURCE_HASH_MISMATCH:' "$extract"/classes*.dex
 
 apksigner=$(find "${ANDROID_HOME:-$HOME/Android/Sdk}/build-tools" \
   -type f -name apksigner 2>/dev/null | sort -V | tail -n1 || true)
@@ -159,6 +155,7 @@ AZHJ_ORACLE_SHA256=$expected_oracle
 AZHJ_PAYLOAD_SHA256=$expected_payload
 KSUD_SHA256=$expected_ksud
 AZHJ_KSU_SHA256=$expected_ko
+AZHJ_KSU_NATIVE_LIBRARY_GATE=PASS
 APK_SHA256=$apk_hash
 APK_SIGNATURE_GATE=PASS
 APK_EMBEDDED_HASH_GATE=PASS

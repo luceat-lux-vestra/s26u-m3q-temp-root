@@ -131,7 +131,7 @@ jobs:
             exit 125
           fi
           unzip -Z1 "$apk" > "$work/apk-list.txt"
-          if grep -Fq 'kernelsu-azhj-kdp-m3q-compat.ko' "$work/apk-list.txt"; then
+          if grep -Eq 'kernelsu-azhj-kdp-m3q-compat\.ko|libm3qksumodule\.so' "$work/apk-list.txt"; then
             echo 'FAIL: default AZG3 APK unexpectedly contains AZHJ KernelSU module' >&2
             exit 125
           fi
@@ -159,6 +159,7 @@ jobs:
           test "$(git hash-object android/app/build.gradle)" = \
             f554159032883d83216de48765b3afa713ff4839
           test ! -e android/app/src/main/java/dev/indevelopment/m3qroot/AzhjKernelSuPreloader.java
+          test ! -e android/app/src/main/jniLibs/arm64-v8a/libm3qksumodule.so
           test ! -e android/app/src/main/assets/azhj/kernelsu-azhj-kdp-m3q-compat.ko
           echo 'AZHJ_OVERLAY_RESTORE_GATE=PASS'
 
