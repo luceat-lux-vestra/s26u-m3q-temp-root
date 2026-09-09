@@ -6,6 +6,7 @@ if [ "$#" -ne 2 ]; then
   exit 2
 fi
 
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 ko=$(realpath "$1")
 out=$(realpath -m "$2")
 expected_ko='e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7'
@@ -20,6 +21,7 @@ command -v git >/dev/null
 command -v rustup >/dev/null
 command -v cargo >/dev/null
 command -v sha256sum >/dev/null
+command -v python3 >/dev/null
 
 source_properties="$ANDROID_NDK_HOME/source.properties"
 test -f "$source_properties"
@@ -52,6 +54,14 @@ git clone -q https://github.com/tiann/KernelSU.git "$ksu"
 git -C "$ksu" checkout -q --detach "$kernelsu_commit"
 test "$(git -C "$ksu" rev-parse HEAD)" = "$kernelsu_commit"
 test -z "$(git -C "$ksu" status --porcelain)"
+
+# Add only the M3Q completion-barrier flag. The patcher verifies the exact
+# upstream blob identities and exact replacement cardinalities before editing.
+python3 "$script_dir/patch_azhj_ksud_foreground.py" "$ksu"
+git -C "$ksu" diff --check
+patched_files=$(git -C "$ksu" diff --name-only | sort)
+printf '%s\n' "$patched_files"
+test "$patched_files" = $'userspace/ksud/src/cli.rs\nuserspace/ksud/src/late_load.rs'
 
 asset="$ksu/userspace/ksud/bin/aarch64/android16-6.12_kernelsu.ko"
 cp "$ko" "$asset"
