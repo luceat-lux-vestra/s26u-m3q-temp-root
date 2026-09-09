@@ -10,6 +10,8 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
 ko=$(realpath "$1")
 engine="$script_dir/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java"
+activity="$script_dir/app/src/main/java/dev/indevelopment/m3qroot/MainActivity.java"
+strings_file="$script_dir/app/src/main/res/values/strings.xml"
 gradle_file="$script_dir/app/build.gradle"
 preloader_template="$script_dir/azhj/AzhjKernelSuPreloader.java"
 preloader_dest="$script_dir/app/src/main/java/dev/indevelopment/m3qroot/AzhjKernelSuPreloader.java"
@@ -30,6 +32,8 @@ expected_ksud='3ce5753203c93f4d733fbc10eebd7a69152189afb1d2a15bfd855bd6b5d4f622'
 expected_helper='a3bc95af6b31a988da0f19b4285c20af31735569dd0c9abd64752e26622bc08f'
 expected_oracle='00c1d4d577f013e3823cb33998576e17bbb9e2697cc0787efe3a7a95f10f45af'
 expected_payload='0f873301def6b8c834942565e70b0a01f88270e74190dbfd596881c5e6944106'
+expected_activity_blob='b7b19c2669408a9de125237fe491928fdc9850db'
+expected_strings_blob='a70879c89ddaaf35ac77a18eb0d091ae7d16d967'
 
 hash_of() { sha256sum "$1" | awk '{print $1}'; }
 assert_hash() {
@@ -42,14 +46,30 @@ assert_hash() {
   fi
   echo "$label=$actual"
 }
+assert_git_blob() {
+  local path=$1 expected=$2 label=$3
+  local actual
+  actual=$(git -C "$repo_root" hash-object -- "$path")
+  if [ "$actual" != "$expected" ]; then
+    echo "FAIL: $label git blob $actual != $expected" >&2
+    exit 125
+  fi
+  echo "$label=$actual"
+}
 
 assert_hash "$ko" "$expected_ko" AZHJ_KSU_INPUT_SHA256
 assert_hash "$ksud" "$expected_ksud" KSUD_SHA256
+assert_git_blob "$activity" "$expected_activity_blob" MAIN_ACTIVITY_SOURCE_GIT_BLOB_SHA1
+assert_git_blob "$strings_file" "$expected_strings_blob" STRINGS_SOURCE_GIT_BLOB_SHA1
 
 work=$(mktemp -d)
 engine_backup="$work/M3qRootEngine.java"
+activity_backup="$work/MainActivity.java"
+strings_backup="$work/strings.xml"
 gradle_backup="$work/build.gradle"
 cp "$engine" "$engine_backup"
+cp "$activity" "$activity_backup"
+cp "$strings_file" "$strings_backup"
 cp "$gradle_file" "$gradle_backup"
 if [ -e "$preloader_dest" ]; then
   echo "FAIL: AZHJ overlay destination already exists: $preloader_dest" >&2
@@ -65,6 +85,8 @@ fi
 
 cleanup() {
   cp "$engine_backup" "$engine"
+  cp "$activity_backup" "$activity"
+  cp "$strings_backup" "$strings_file"
   cp "$gradle_backup" "$gradle_file"
   rm -f "$preloader_dest"
   rm -rf "$jni_dir"
@@ -82,6 +104,59 @@ assert_hash "$native_bin/slide_oracle.app.so" "$expected_oracle" AZHJ_ORACLE_SHA
 assert_hash "$native_bin/preload.app.so" "$expected_payload" AZHJ_PAYLOAD_SHA256
 
 python3 "$repo_root/tools/prepare_azhj_app.py" "$engine" "$gradle_file"
+python3 - "$activity" "$strings_file" <<'PY'
+from pathlib import Path
+import sys
+
+activity = Path(sys.argv[1])
+strings = Path(sys.argv[2])
+
+def replace_exact(path: Path, replacements: list[tuple[str, str]]) -> None:
+    text = path.read_text(encoding="utf-8")
+    for old, new in replacements:
+        count = text.count(old)
+        if count != 1:
+            raise SystemExit(
+                f"FAIL: {path} expected exactly one occurrence of {old!r}, found {count}"
+            )
+        text = text.replace(old, new)
+    path.write_text(text, encoding="utf-8")
+
+replace_exact(
+    activity,
+    [
+        (
+            "이 앱은 SM-S948N AZG3 펌웨어에서만 실행할 수 있습니다.",
+            "이 앱은 SM-S948N AZHJ 펌웨어에서만 실행할 수 있습니다.",
+        ),
+        (
+            "정확한 SM-S948N AZG3 빌드에서만 실행할 수 있습니다.",
+            "정확한 SM-S948N AZHJ 빌드에서만 실행할 수 있습니다.",
+        ),
+    ],
+)
+replace_exact(
+    strings,
+    [
+        (
+            "Galaxy S26 Ultra · AZG3 전용 · 재부팅 시 해제",
+            "Galaxy S26 Ultra · AZHJ 전용 · 재부팅 시 해제",
+        ),
+        (
+            "SM-S948N AZG3 전용 RAM-only 방식입니다.",
+            "SM-S948N AZHJ 전용 RAM-only 방식입니다.",
+        ),
+    ],
+)
+
+activity_text = activity.read_text(encoding="utf-8")
+strings_text = strings.read_text(encoding="utf-8")
+if "AZG3" in activity_text:
+    raise SystemExit("FAIL: stale AZG3 UI text remains in transformed MainActivity")
+if "AZG3 전용" in strings_text:
+    raise SystemExit("FAIL: stale AZG3-only UI text remains in transformed strings")
+print("AZHJ_UI_SOURCE_OVERLAY=PASS")
+PY
 cp "$preloader_template" "$preloader_dest"
 
 rm -rf "$jni_dir"
@@ -124,6 +199,12 @@ if grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys' "$extract"/classes*.dex;
 fi
 grep -aFq 'M3Q_AZHJ_KSU_MODULE_OK:' "$extract"/classes*.dex
 grep -aFq 'M3Q_AZHJ_KSU_SOURCE_HASH_MISMATCH:' "$extract"/classes*.dex
+grep -aFq '이 앱은 SM-S948N AZHJ 펌웨어에서만 실행할 수 있습니다.' "$extract"/classes*.dex
+grep -aFq '정확한 SM-S948N AZHJ 빌드에서만 실행할 수 있습니다.' "$extract"/classes*.dex
+if grep -aFq '이 앱은 SM-S948N AZG3 펌웨어에서만 실행할 수 있습니다.' "$extract"/classes*.dex; then
+  echo 'FAIL: stale AZG3 MainActivity UI remains in AZHJ classes.dex' >&2
+  exit 125
+fi
 
 apksigner=$(find "${ANDROID_HOME:-$HOME/Android/Sdk}/build-tools" \
   -type f -name apksigner 2>/dev/null | sort -V | tail -n1 || true)
@@ -140,6 +221,15 @@ fi
 badging="$work/apk-badging.txt"
 "$aapt" dump badging "$final_apk" > "$badging"
 grep -Fq "package: name='dev.indevelopment.m3qroot.hardened.azhjpreflight'" "$badging"
+resources="$work/apk-resources.txt"
+"$aapt" dump --values resources "$final_apk" > "$resources"
+grep -Fq 'Galaxy S26 Ultra · AZHJ 전용 · 재부팅 시 해제' "$resources"
+grep -Fq 'SM-S948N AZHJ 전용 RAM-only 방식입니다.' "$resources"
+if grep -Fq 'AZG3 전용' "$resources"; then
+  echo 'FAIL: stale AZG3-only resource text remains in AZHJ APK' >&2
+  exit 125
+fi
+echo 'AZHJ_UI_ARTIFACT_GATE=PASS'
 "$apksigner" verify --verbose "$final_apk"
 
 apk_hash=$(hash_of "$final_apk")
@@ -160,6 +250,7 @@ APK_SHA256=$apk_hash
 APK_SIGNATURE_GATE=PASS
 APK_EMBEDDED_HASH_GATE=PASS
 AZHJ_IDENTITY_OVERLAY_GATE=PASS
+AZHJ_UI_OVERLAY_GATE=PASS
 AZHJ_RUNTIME_KERNEL_WRITE=UNVERIFIED_FAIL
 EVIDENCE
 (
