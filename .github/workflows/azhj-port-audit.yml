@@ -9,11 +9,25 @@ on:
 permissions:
   contents: read
 
+env:
+  REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
 jobs:
   ksud-container-audit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
       - name: Audit compressed KernelSU asset container
         shell: bash
         run: |
@@ -31,6 +45,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
       - uses: android-actions/setup-android@v3
       - name: Install Android NDK 29
         shell: bash
@@ -53,6 +78,17 @@ jobs:
       options: --privileged
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
 
       - name: Checkout KernelSU v3.2.5 and pinned Samsung patchset
         shell: bash
