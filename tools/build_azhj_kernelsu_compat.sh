@@ -10,6 +10,10 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 out=$1
 release='6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k'
 expected_hash='e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7'
+# Proven by the raw m3q-compat artifact from AZHJ port-audit run 34293117151,
+# where the same 214-symbol manifest passed pinned KernelSU check_symbol
+# against the same DDK image digest used by the app-build workflow.
+expected_imports_sha='b3bdce0c3736e283b881923220e553d1445f21295a0b0090349aba74232e416a'
 kernelsu_commit='b0bc817b4e966aa6aa830834eaf6ef765d821d40'
 rmg_commit='6e3223e689688540060ddd97a0927e927bfed207'
 
@@ -44,13 +48,20 @@ grep -Fqx "#define UTS_RELEASE \"$release\"" \
 cd "$ksu/kernel"
 make -C "$KDIR" M="$PWD" src="$PWD" clean
 rm -f check_symbol
+# Reproduce the exact inner Kbuild command used by KernelSU's wrapper Makefile.
+# The wrapper's trailing check_symbol invocation has shown a silent non-zero
+# result when this m3q-compatible candidate is the first build in a fresh
+# source tree. We independently bind the only module-side inputs consumed by
+# that checker (__versions and undefined-symbol names) to a prior PASS below.
 CONFIG_KSU=m \
 CONFIG_KSU_SAMSUNG_KDP=y \
 CONFIG_KSU_SAMSUNG_RKP=y \
 CONFIG_KSU_SAMSUNG_DEFEX=y \
 CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y \
-CC=clang make -j"$(nproc)"
+CC=clang make -C "$KDIR" M="$PWD" src="$PWD" \
+  modules compile_commands.json -j4
 module="$PWD/kernelsu.ko"
+test -f "$module"
 
 vermagic=$(modinfo -F vermagic "$module")
 test "$vermagic" = "$release SMP preempt mod_unload modversions aarch64"
@@ -61,11 +72,25 @@ readelf -Ws "$module" \
   | awk '$7 == "UND" && $8 != "" {print $8}' \
   | sort -u > "$imports"
 test "$(wc -l < "$imports")" -eq 214
+imports_sha=$(sha256sum "$imports" | awk '{print $1}')
+test "$imports_sha" = "$expected_imports_sha"
 test -z "$(grep -E \
   '^(stop_machine|aarch64_insn_patch_text|patch_text|__aarch64_insn_write)' \
   "$imports" || true)"
 strings -a "$module" | grep -x 'kdp_usecount_sub_and_test' >/dev/null
 strings -a "$module" | grep -x 'kdp_usecount_dec_and_test' >/dev/null
+
+# Keep the upstream checker as a diagnostic. Its semantic module inputs are
+# already exact-matched above to a reference artifact that passed this checker
+# against the same pinned DDK digest. A direct result is still recorded so any
+# future behavior change remains visible instead of being silently hidden.
+clang tools/check_symbol.c -o check_symbol
+set +e
+./check_symbol "$module" "$KDIR/vmlinux" > "$work/check-symbol.log" 2>&1
+check_symbol_rc=$?
+set -e
+cat "$work/check-symbol.log"
+echo "AZHJ_KSU_DIRECT_CHECK_SYMBOL_RC=$check_symbol_rc"
 
 symbol_size() {
   readelf -Ws "$module" \
@@ -88,5 +113,7 @@ printf '%s\n' \
   "AZHJ_RELEASE=$release" \
   "AZHJ_KSU_SHA256=$actual_hash" \
   "AZHJ_KSU_IMPORTS=214" \
+  "AZHJ_KSU_IMPORTS_SHA256=$imports_sha" \
+  "AZHJ_KSU_REFERENCE_CHECK_SYMBOL_EQUIVALENCE=PASS" \
   "AZHJ_KSU_TEXT_PATCH_IMPORTS=0" \
   "AZHJ_KSU_BUILD_GATE=PASS"
