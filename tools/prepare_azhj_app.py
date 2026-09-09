@@ -14,6 +14,17 @@ AZHJ_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k"
 AZG3_FIRMWARE = "S948NKSS4AZG3_OKR4AZG3"
 AZHJ_FIRMWARE = "S948NKSU4AZHJ_OKR4AZHJ"
 ACTIVATE_ANCHOR = '        status("KernelSU 구성 확인 중", STATUS_WORKING);'
+KSU_READY_ANCHOR = '''        if (kernelSu) {
+            markKernelSuVerifiedForThisBoot();
+            return new RootState(true, false, false, ksuOutput);
+        }'''
+KSU_READY_OVERLAY = '''        if (kernelSu && hasVerifiedKernelSuThisBoot()) {
+            return new RootState(true, false, false, ksuOutput);
+        }
+        if (kernelSu && verbose) {
+            log("AZHJ KernelSU control detected without late-load receipt; "
+                    + "recover with KernelSU activation only");
+        }'''
 GRADLE_RELEASE_ANCHOR = '''        release {
             minifyEnabled false
             signingConfig = signingConfigs.debug
@@ -66,12 +77,17 @@ def main() -> int:
     text = replace_exact(text, AZG3_KERNEL, AZHJ_KERNEL)
     text = replace_exact(text, AZG3_FIRMWARE, AZHJ_FIRMWARE)
     text = replace_exact(text, "AZG3 root-single", "AZHJ root-single", expected_count=2)
+    text = replace_exact(text, KSU_READY_ANCHOR, KSU_READY_OVERLAY)
     text = replace_exact(text, ACTIVATE_ANCHOR, ACTIVATE_OVERLAY)
 
     if AZG3_KERNEL in text or AZG3_FIRMWARE in text:
         raise SystemExit("FAIL: stale AZG3 identity remains in transformed engine")
     if text.count("AzhjKernelSuPreloader.ensureLoaded(context, helper, ksud)") != 1:
         raise SystemExit("FAIL: AZHJ KernelSU preload hook cardinality mismatch")
+    if text.count("AZHJ KernelSU control detected without late-load receipt") != 1:
+        raise SystemExit("FAIL: AZHJ KernelSU recovery-state overlay cardinality mismatch")
+    if "markKernelSuVerifiedForThisBoot();\n            return new RootState(true" in text:
+        raise SystemExit("FAIL: AZHJ checkRoot still self-issues a KernelSU ready receipt")
     if AZHJ_KERNEL not in text or AZHJ_FIRMWARE not in text:
         raise SystemExit("FAIL: exact AZHJ identity missing after transform")
 
