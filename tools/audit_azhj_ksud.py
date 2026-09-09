@@ -43,22 +43,23 @@ def main() -> int:
     if e_type != ET_DYN or machine != EM_AARCH64:
         raise SystemExit("ksud is not AArch64 PIE/ET_DYN")
 
-    # KernelSU embeds assets with rust-embed's `compression` feature. The
-    # filenames remain part of Asset::iter()/lookup metadata, while file data
-    # is DEFLATE-compressed by include-flate. Therefore a raw child-ELF scan
-    # is deliberately not used as an extraction mechanism.
+    # KernelSU embeds assets with rust-embed's compression feature. The asset
+    # name remains directly discoverable while the module bytes themselves are
+    # compressed. Device preflight therefore materializes this exact asset via
+    # `debug extract-binary` and hashes it before the single late-load write.
     count_and_require(data, b"android16-6.12_kernelsu.ko", "kmi_asset_name")
     count_and_require(data, b"extract-binary", "extract_binary_cli")
+    count_and_require(data, b"late-load", "late_load_cli")
 
-    # The AZHJ app intentionally supplies an externally audited module through
-    # `ksud insmod` before invoking the legacy late-load flow. Bind that
-    # handoff to the exact bundled userspace binary rather than inferring CLI
-    # support from upstream source alone.
-    count_and_require(data, b"insmod", "insmod_cli")
+    # The AZHJ custom userspace build adds only a hidden foreground switch.
+    # It keeps stock late-load behavior when the switch is absent, while the
+    # M3Q helper uses foreground mode as a real completion barrier around
+    # embedded module load + userspace late-load.
+    count_and_require(data, b"m3q-foreground", "m3q_foreground_cli")
     count_and_require(
         data,
-        b"Load a kernel module with kallsyms access",
-        "insmod_help",
+        b"M3Q_AZHJ_KSUD_FOREGROUND_LATE_LOAD",
+        "m3q_foreground_runtime_marker",
     )
 
     old_release = b"6.12.30-android16-5-pd30ff70-abogkiS948NKSS4AZG3-4k"
@@ -81,7 +82,8 @@ def main() -> int:
 
     print("asset_container=rust-embed-compressed")
     print("module_extraction=ksud_debug_extract-binary_required")
-    print("external_module_insmod=PASS")
+    print("embedded_module_late_load=PASS")
+    print("foreground_completion_barrier=PASS")
     return 0
 
 
