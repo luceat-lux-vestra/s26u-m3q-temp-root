@@ -10,18 +10,22 @@ compiler="$ndk_root/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-andr
 project="m3q-BP4A.251205.006-AZHJ"
 source_project="m3q-BP4A.251205.006"
 output_dir="$exploit_root/build/$project/bin"
+generated_dir="$exploit_root/build/$project/generated"
+azhj_su_daemon="$generated_dir/su_daemon_azhj.c"
 
 if [ ! -x "$compiler" ]; then
     echo "Android NDK compiler not found: $compiler" >&2
     exit 1
 fi
 
-mkdir -p "$output_dir"
+mkdir -p "$output_dir" "$generated_dir"
+python3 "$repo_root/tools/patch_azhj_su_daemon.py" \
+    "$exploit_root/src/su_daemon.c" "$azhj_su_daemon"
 cd "$exploit_root"
 
 "$compiler" \
     -O2 -g0 -Wall -Wextra -Werror -Isrc -fPIE -pie \
-    src/su_daemon.c -ldl \
+    "build/$project/generated/su_daemon_azhj.c" -ldl \
     -o "build/$project/bin/su_daemon_aarch64_pie.app"
 
 "$compiler" \
