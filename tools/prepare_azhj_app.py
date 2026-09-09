@@ -103,9 +103,10 @@ AZHJ_ACTIVATE_METHOD = '''    private int activateKernelSu(File helper, File ksu
         }
 
         /* AzhjKernelSuPreloader returns 0 only after the custom foreground ksud
-         * has completed embedded-KO late-load, the native helper has verified
-         * exact v32525 control, and the app has independently re-probed the
-         * same exact control state. Only then issue this-boot ready receipt. */
+         * has completed embedded-KO late-load and the root-context native
+         * worker has verified exact v32525 control. The helper K protocol
+         * propagates that worker status as the completion barrier; no app-UID
+         * KernelSU discovery syscall is issued. Only then issue this-boot ready receipt. */
         if (!markKernelSuVerifiedForThisBoot()) {
             log("KernelSU는 foreground late-load 검증됐지만 이 boot ID의 영수증을 저장하지 못했습니다.");
             return 123;
