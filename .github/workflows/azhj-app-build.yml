@@ -28,6 +28,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           actual=$(git rev-parse HEAD)
           echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
           echo "CHECKOUT_HEAD_SHA=$actual"
@@ -61,6 +62,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           actual=$(git rev-parse HEAD)
           echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
           echo "CHECKOUT_HEAD_SHA=$actual"
@@ -69,6 +71,16 @@ jobs:
             76516319bfd3d3a7a03ed308f2dfb791db715f25
           test "$(git hash-object android/app/build.gradle)" = \
             f554159032883d83216de48765b3afa713ff4839
+
+      - name: Audit exact bundled ksud
+        shell: bash
+        run: |
+          set -euo pipefail
+          ksud=android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp
+          test "$(sha256sum "$ksud" | awk '{print $1}')" = \
+            3ce5753203c93f4d733fbc10eebd7a69152189afb1d2a15bfd855bd6b5d4f622
+          python3 tools/audit_azhj_ksud.py --ksud "$ksud"
+          echo 'AZHJ_EXACT_HEAD_KSUD_AUDIT=PASS'
 
       - uses: actions/setup-java@v4
         with:
