@@ -43,6 +43,47 @@ AZHJ_ACTIVATE_METHOD = '''    private int activateKernelSu(File helper, File ksu
             return 126;
         }
 
+        /* A fresh exploit marks ATTEMPT_BOOT_ID before root work. Bootstrap-only
+         * activation intentionally bypasses that fresh-exploit guard, so use
+         * the durable AZHJ phase journal as an independent KSU-attempt lock.
+         * The helper -c client does not reliably propagate the inner shell rc;
+         * therefore this gate accepts only one exact terminal marker. */
+        String journalGuard = "set -u\\n"
+                + "journal='/data/local/tmp/m3q-azhj-ksu-phase.log'\\n"
+                + "boot_id=$(cat /proc/sys/kernel/random/boot_id)\\n"
+                + "if [ ! -e \\\"$journal\\\" ]; then "
+                + "echo M3Q_AZHJ_ACTIVATION_JOURNAL_ABSENT; exit 0; fi\\n"
+                + "count=$(grep -c '^BOOT_ID=' \\\"$journal\\\" 2>/dev/null || true)\\n"
+                + "if [ \\\"$count\\\" -ne 1 ]; then "
+                + "echo M3Q_AZHJ_PHASE_JOURNAL_PROVENANCE_INVALID; exit 0; fi\\n"
+                + "old_boot=$(sed -n 's/^BOOT_ID=//p' \\\"$journal\\\")\\n"
+                + "if [ \\\"$old_boot\\\" = \\\"$boot_id\\\" ]; then "
+                + "echo M3Q_AZHJ_SAME_BOOT_ACTIVATION_EXISTS:$boot_id; exit 0; fi\\n"
+                + "echo M3Q_AZHJ_PRIOR_BOOT_JOURNAL:$old_boot\\n";
+        List<String> journalLines = new ArrayList<>();
+        ProcessBuilder journalProcess = new ProcessBuilder(
+                helper.getAbsolutePath(), "-c", journalGuard);
+        journalProcess.redirectErrorStream(true);
+        int journalCode = runProcess(journalProcess, 15, journalLines, true);
+        if (journalCode == EXIT_TERMINATION_UNCONFIRMED) {
+            return journalCode;
+        }
+        String journalOutput = String.join("\\n", journalLines);
+        if (journalOutput.contains("M3Q_AZHJ_SAME_BOOT_ACTIVATION_EXISTS:")) {
+            log("이 boot에서 KernelSU activation journal이 이미 존재합니다. 재부팅 전 재시도를 차단합니다.");
+            return 124;
+        }
+        if (journalOutput.contains("M3Q_AZHJ_PHASE_JOURNAL_PROVENANCE_INVALID")) {
+            log("AZHJ phase journal provenance가 불명확하여 증거를 덮어쓰지 않습니다.");
+            return 125;
+        }
+        boolean journalAbsent = journalOutput.contains("M3Q_AZHJ_ACTIVATION_JOURNAL_ABSENT");
+        boolean priorBoot = journalOutput.contains("M3Q_AZHJ_PRIOR_BOOT_JOURNAL:");
+        if (journalCode != 0 || journalAbsent == priorBoot) {
+            log("AZHJ activation journal guard의 유일한 terminal receipt를 확인하지 못했습니다.");
+            return 125;
+        }
+
         status("KernelSU 활성화 중", STATUS_WORKING);
         int code = AzhjKernelSuPreloader.activate(context, helper, ksud);
         if (code == EXIT_TERMINATION_UNCONFIRMED) {
@@ -131,6 +172,14 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ reboot-required recovery-state overlay cardinality mismatch")
     if text.count("KernelSU 3.2.5 LKM foreground late-load 검증 완료") != 1:
         raise SystemExit("FAIL: AZHJ foreground-authoritative ready receipt missing")
+    if text.count("M3Q_AZHJ_SAME_BOOT_ACTIVATION_EXISTS:") != 1:
+        raise SystemExit("FAIL: AZHJ same-boot activation guard missing")
+    if text.count("M3Q_AZHJ_PHASE_JOURNAL_PROVENANCE_INVALID") != 1:
+        raise SystemExit("FAIL: AZHJ journal provenance guard missing")
+    if text.count("M3Q_AZHJ_ACTIVATION_JOURNAL_ABSENT") != 1:
+        raise SystemExit("FAIL: AZHJ journal-absent receipt missing")
+    if text.count("M3Q_AZHJ_PRIOR_BOOT_JOURNAL:") != 1:
+        raise SystemExit("FAIL: AZHJ prior-boot journal receipt missing")
     if "recover with KernelSU activation only" in text:
         raise SystemExit("FAIL: stale same-boot recovery guidance remains")
     if "KernelSU 3.2.5 LKM late-load daemon 검증 완료" in text:
