@@ -81,16 +81,40 @@ jobs:
           name: azhj-kernelsu-compat-exact
           path: ${{ runner.temp }}/azhj-ko
 
-      - name: Build ksud with exact AZHJ module embedded
+      - name: Prove exact embedded ksud reproducibility
         shell: bash
         run: |
           set -euo pipefail
           ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
-          test "$(sha256sum "$ko" | awk '{print $1}')" = \
-            e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
-          bash tools/build_azhj_ksud_embedded.sh \
-            "$ko" "$RUNNER_TEMP/ksud-azhj-embedded"
-          sha256sum "$RUNNER_TEMP/ksud-azhj-embedded"
+          expected_ko=e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+          expected_ksud=3b022e75c13bb8fd5e7bd84642fd509983a092ecb675397b55ceb7a912eaa402
+          test "$(sha256sum "$ko" | awk '{print $1}')" = "$expected_ko"
+
+          M3Q_KSUD_BUILD_ROOT="$RUNNER_TEMP/ksud-build-a" \
+            bash tools/build_azhj_ksud_embedded.sh \
+              "$ko" "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          M3Q_KSUD_BUILD_ROOT="$RUNNER_TEMP/ksud-build-b-different-absolute-path" \
+            bash tools/build_azhj_ksud_embedded.sh \
+              "$ko" "$RUNNER_TEMP/ksud-azhj-embedded-b"
+
+          hash_a=$(sha256sum "$RUNNER_TEMP/ksud-azhj-embedded-a" | awk '{print $1}')
+          hash_b=$(sha256sum "$RUNNER_TEMP/ksud-azhj-embedded-b" | awk '{print $1}')
+          echo "AZHJ_KSUD_REPRO_HASH_A=$hash_a"
+          echo "AZHJ_KSUD_REPRO_HASH_B=$hash_b"
+          test "$hash_a" = "$hash_b"
+          test "$hash_a" = "$expected_ksud"
+          cmp -s "$RUNNER_TEMP/ksud-azhj-embedded-a" "$RUNNER_TEMP/ksud-azhj-embedded-b"
+          echo 'AZHJ_KSUD_EMBEDDED_REPRODUCIBILITY=PASS'
+
+          file "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          grep -aFq 'android16-6.12_kernelsu.ko' "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          grep -aFq 'late-load' "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          grep -aFq 'Load a kernel module with kallsyms access' "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          if strings "$RUNNER_TEMP/ksud-azhj-embedded-a" | grep -Eq '/ksud-build-a|/ksud-build-b-different-absolute-path'; then
+            echo 'FAIL: build-root path leaked into ksud binary' >&2
+            exit 125
+          fi
+          cp "$RUNNER_TEMP/ksud-azhj-embedded-a" "$RUNNER_TEMP/ksud-azhj-embedded"
 
       - uses: actions/upload-artifact@v4
         with:
