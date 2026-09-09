@@ -14,10 +14,18 @@ AZHJ_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k"
 AZG3_FIRMWARE = "S948NKSS4AZG3_OKR4AZG3"
 AZHJ_FIRMWARE = "S948NKSU4AZHJ_OKR4AZHJ"
 REBOOT_REQUIRED_MARKER = "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
+STANDALONE_ACTIVATION_DISABLED_MARKER = "M3Q_AZHJ_STANDALONE_ACTIVATION_DISABLED:REBOOT_REQUIRED"
 ACTIVATE_METHOD_START = "    private int activateKernelSu(File helper, File ksud) {"
 ACTIVATE_METHOD_END = "    private void appendKernelSuLog(File helper) {"
 ATTEMPT_METHOD_START = "    boolean markAttemptForThisBoot() {"
 ATTEMPT_METHOD_END = "    boolean hasAttemptedThisBoot() {"
+PUBLIC_ACTIVATE_ANCHOR = '''    int activateKernelSu() {
+        return activateKernelSu(nativeFile(HELPER), nativeFile(KSUD));
+    }'''
+PUBLIC_ACTIVATE_OVERLAY = '''    int activateKernelSu() {
+        log("M3Q_AZHJ_STANDALONE_ACTIVATION_DISABLED:REBOOT_REQUIRED");
+        return 124;
+    }'''
 KSU_READY_ANCHOR = '''        if (kernelSu) {
             markKernelSuVerifiedForThisBoot();
             return new RootState(true, false, false, ksuOutput);
@@ -194,11 +202,12 @@ AZHJ_ACTIVATE_METHOD = '''    private int activateKernelSu(File helper, File ksu
             return 126;
         }
 
-        /* A fresh exploit marks ATTEMPT_BOOT_ID before root work. Bootstrap-only
-         * activation intentionally bypasses that fresh-exploit guard, so use
-         * the durable AZHJ phase journal as an independent KSU-attempt lock.
+        /* This private path is the uninterrupted continuation of runFreshRoot()
+         * after its root process returned success. The standalone activation-only
+         * entry point is disabled for AZHJ. The durable phase journal therefore
+         * acts only as a same-boot re-entry/provenance lock once activation begins.
          * The helper -c client does not reliably propagate the inner shell rc;
-         * therefore this gate accepts only one exact terminal marker. */
+         * this gate accepts only one exact terminal marker. */
         String journalGuard = "set -u\\n"
                 + "journal='/data/local/tmp/m3q-azhj-ksu-phase.log'\\n"
                 + "boot_id=$(cat /proc/sys/kernel/random/boot_id)\\n"
@@ -312,6 +321,7 @@ def main() -> int:
     text = replace_exact(text, AZG3_FIRMWARE, AZHJ_FIRMWARE)
     text = replace_exact(text, "AZG3 root-single", "AZHJ root-single", expected_count=2)
     text = replace_exact(text, KSU_READY_ANCHOR, KSU_READY_OVERLAY)
+    text = replace_exact(text, PUBLIC_ACTIVATE_ANCHOR, PUBLIC_ACTIVATE_OVERLAY)
     text = replace_region_exact(
         text, ATTEMPT_METHOD_START, ATTEMPT_METHOD_END, AZHJ_ATTEMPT_METHOD
     )
@@ -327,6 +337,12 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ reboot-required recovery-state overlay cardinality mismatch")
     if text.count(REBOOT_REQUIRED_MARKER) != 2:
         raise SystemExit("FAIL: AZHJ dirty-KSU reboot-required marker cardinality mismatch")
+    if text.count(STANDALONE_ACTIVATION_DISABLED_MARKER) != 1:
+        raise SystemExit("FAIL: AZHJ standalone activation-only disable marker cardinality mismatch")
+    if "return activateKernelSu(nativeFile(HELPER), nativeFile(KSUD));" in text:
+        raise SystemExit("FAIL: AZHJ standalone activation-only entry still reaches private activation")
+    if "Bootstrap-only activation intentionally bypasses" in text:
+        raise SystemExit("FAIL: stale bootstrap-only recovery contract remains")
     if text.count("RootState preflight = checkRoot(false);") != 1:
         raise SystemExit("FAIL: AZHJ final pre-exploit live-state probe missing")
     if text.count("AZHJ bootstrap root appeared before exploit start") != 1:
@@ -371,6 +387,7 @@ def main() -> int:
     print(f"ENGINE_AZHJ_SHA256={hashlib.sha256(encoded).hexdigest()}")
     print("AZHJ_DIRTY_KSU_REBOOT_REQUIRED_GATE=PASS")
     print("AZHJ_FINAL_PRE_EXPLOIT_STATE_GATE=PASS")
+    print("AZHJ_STANDALONE_ACTIVATION_DISABLED_GATE=PASS")
     print("AZHJ_DURABLE_ROOT_ATTEMPT_GUARD_OVERLAY=PASS")
 
     gradle_raw = args.gradle.read_bytes()
