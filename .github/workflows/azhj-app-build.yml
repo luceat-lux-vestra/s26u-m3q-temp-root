@@ -49,6 +49,56 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  ksud-embedded-probe:
+    needs: kernelsu-compat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install exact Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'ndk;29.0.14206865'
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: azhj-kernelsu-compat-exact
+          path: ${{ runner.temp }}/azhj-ko
+
+      - name: Build ksud with exact AZHJ module embedded
+        shell: bash
+        run: |
+          set -euo pipefail
+          ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
+          test "$(sha256sum "$ko" | awk '{print $1}')" = \
+            e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+          bash tools/build_azhj_ksud_embedded.sh \
+            "$ko" "$RUNNER_TEMP/ksud-azhj-embedded"
+          sha256sum "$RUNNER_TEMP/ksud-azhj-embedded"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azhj-ksud-embedded-probe
+          path: ${{ runner.temp }}/ksud-azhj-embedded
+          if-no-files-found: error
+          retention-days: 14
+
   app:
     needs: kernelsu-compat
     runs-on: ubuntu-latest
