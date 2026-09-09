@@ -48,7 +48,7 @@ $payloadArgs = @(
   '-DTARGET_CONFIG_H=\"targets/m3q-BP4A.251205.006-AZHJ/target.h\"',
   "src\targets\$sourceProject\main.c",
   "src\targets\$sourceProject\util.c",
-  "src\targets\$sourceProject\slide.c",
+  "src\targets\$project\slide.c",
   "src\targets\$project\fops.c",
   "src\targets\$sourceProject\pipe.c",
   'src\faketables.c', 'src\stage3.c',

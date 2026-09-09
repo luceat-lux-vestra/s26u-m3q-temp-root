@@ -43,7 +43,8 @@ cd "$exploit_root"
 # RVAs. Reuse the audited m3q source while selecting the AZHJ exact-image
 # target header at compile time. fops.c is AZHJ-specific because its teardown
 # must restore the exact stock NULL splice_read slot after the shared carrier
-# temporarily installs COPY_SPLICE_READ.
+# temporarily installs COPY_SPLICE_READ. slide.c is AZHJ-specific so tracefs
+# pre-state and failure/success cleanup are verified before any write stage.
 "$compiler" \
     -O2 -g0 -Wall -Wextra -Werror \
     -Wno-unused-parameter -Wno-sign-compare -Wno-unused-function \
@@ -51,7 +52,7 @@ cd "$exploit_root"
     '-DTARGET_CONFIG_H="targets/m3q-BP4A.251205.006-AZHJ/target.h"' \
     "src/targets/$source_project/main.c" \
     "src/targets/$source_project/util.c" \
-    "src/targets/$source_project/slide.c" \
+    "src/targets/$project/slide.c" \
     "src/targets/$project/fops.c" \
     "src/targets/$source_project/pipe.c" \
     src/faketables.c \
