@@ -15,6 +15,8 @@ AZG3_FIRMWARE = "S948NKSS4AZG3_OKR4AZG3"
 AZHJ_FIRMWARE = "S948NKSU4AZHJ_OKR4AZHJ"
 ACTIVATE_METHOD_START = "    private int activateKernelSu(File helper, File ksud) {"
 ACTIVATE_METHOD_END = "    private void appendKernelSuLog(File helper) {"
+ATTEMPT_METHOD_START = "    boolean markAttemptForThisBoot() {"
+ATTEMPT_METHOD_END = "    boolean hasAttemptedThisBoot() {"
 KSU_READY_ANCHOR = '''        if (kernelSu) {
             markKernelSuVerifiedForThisBoot();
             return new RootState(true, false, false, ksuOutput);
@@ -36,6 +38,125 @@ GRADLE_RELEASE_OVERLAY = '''        release {
             minifyEnabled false
             signingConfig = signingConfigs.debug
         }'''
+
+AZHJ_ATTEMPT_METHOD = '''    boolean markAttemptForThisBoot() {
+        if (bootSettleRemainingMillis() > 0) return false;
+        synchronized (ATTEMPT_LOCK) {
+            String bootId = currentBootId();
+            if (bootId.isEmpty()
+                    || !bootId.matches("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) {
+                log("AZHJ current boot ID 형식을 검증하지 못해 fresh-root를 거부합니다.");
+                return false;
+            }
+
+            SharedPreferences prefs = preferences();
+            if (bootId.equals(prefs.getString(ATTEMPT_BOOT_ID, ""))) {
+                log("AZHJ app-local same-boot attempt receipt가 이미 존재합니다.");
+                return false;
+            }
+
+            /* The app-local SharedPreferences receipt disappears after uninstall.
+             * Arm a shell-owned, boot-scoped receipt in /data/local/tmp before any
+             * exploit process can start. The existing phase journal is checked too,
+             * so reinstalling a newer APK cannot erase same-boot KSU-attempt evidence.
+             * Shizuku shell is therefore an explicit AZHJ safety dependency. */
+            if (!ShizukuShell.isRunning() || !ShizukuShell.isGranted()) {
+                log("AZHJ durable fresh-root guard에는 Shizuku shell 권한이 필요합니다.");
+                return false;
+            }
+            int shizukuUid = ShizukuShell.uid();
+            if (shizukuUid != 2000 && shizukuUid != 0) {
+                log("AZHJ durable fresh-root guard가 shell/root UID가 아니므로 실행을 거부합니다. uid="
+                        + shizukuUid);
+                return false;
+            }
+
+            String durableGate = "set -eu\\n"
+                    + "marker='/data/local/tmp/m3q-azhj-root-attempt.log'\\n"
+                    + "phase='/data/local/tmp/m3q-azhj-ksu-phase.log'\\n"
+                    + "boot_id=$(cat /proc/sys/kernel/random/boot_id)\\n"
+                    + "if [ \\\"$boot_id\\\" != \\\"$M3Q_EXPECT_BOOT_ID\\\" ]; then "
+                    + "echo M3Q_AZHJ_ROOT_ATTEMPT_BOOT_MISMATCH; exit 125; fi\\n"
+                    + "validate_boot_file() {\\n"
+                    + "  path=\\\"$1\\\"; label=\\\"$2\\\"\\n"
+                    + "  if [ ! -e \\\"$path\\\" ] && [ ! -L \\\"$path\\\" ]; then return 0; fi\\n"
+                    + "  if [ -L \\\"$path\\\" ] || [ ! -f \\\"$path\\\" ] || [ ! -r \\\"$path\\\" ]; then "
+                    + "echo M3Q_AZHJ_ROOT_ATTEMPT_PROVENANCE_INVALID:$label; exit 125; fi\\n"
+                    + "  count=$(grep -c '^BOOT_ID=' \\\"$path\\\" 2>/dev/null || true)\\n"
+                    + "  if [ \\\"$count\\\" -ne 1 ]; then "
+                    + "echo M3Q_AZHJ_ROOT_ATTEMPT_PROVENANCE_INVALID:$label; exit 125; fi\\n"
+                    + "  old_boot=$(sed -n 's/^BOOT_ID=//p' \\\"$path\\\")\\n"
+                    + "  if ! printf '%s\\\\n' \\\"$old_boot\\\" | grep -Eq "
+                    + "'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'; then "
+                    + "echo M3Q_AZHJ_ROOT_ATTEMPT_PROVENANCE_INVALID:$label; exit 125; fi\\n"
+                    + "  if [ \\\"$old_boot\\\" = \\\"$boot_id\\\" ]; then "
+                    + "echo M3Q_AZHJ_ROOT_ATTEMPT_SAME_BOOT:$label:$boot_id; exit 124; fi\\n"
+                    + "}\\n"
+                    + "validate_boot_file \\\"$phase\\\" phase\\n"
+                    + "validate_boot_file \\\"$marker\\\" marker\\n"
+                    + "tmp=\\\"${marker}.tmp.$$\\\"\\n"
+                    + "trap 'rm -f -- \\\"$tmp\\\"' EXIT HUP INT TERM\\n"
+                    + "rm -f -- \\\"$tmp\\\"\\n"
+                    + "umask 022\\n"
+                    + "printf 'SCHEMA=1\\\\nBOOT_ID=%s\\\\nSTATE=ARMED\\\\n' \\\"$boot_id\\\" > \\\"$tmp\\\"\\n"
+                    + "chmod 0644 \\\"$tmp\\\"\\n"
+                    + "mv -f -- \\\"$tmp\\\" \\\"$marker\\\"\\n"
+                    + "trap - EXIT HUP INT TERM\\n"
+                    + "sync\\n"
+                    + "echo M3Q_AZHJ_ROOT_ATTEMPT_ARMED:$boot_id\\n";
+
+            String[] environment = {
+                    "HOME=/data/local/tmp",
+                    "TMPDIR=/data/local/tmp",
+                    "PATH=/system/bin:/system/xbin",
+                    "M3Q_EXPECT_BOOT_ID=" + bootId
+            };
+            String[] command = {"/system/bin/sh", "-c", durableGate};
+            List<String> gateLines = new ArrayList<>();
+            int gateCode;
+            try {
+                Process process = ShizukuShell.exec(command, environment, "/data/local/tmp");
+                gateCode = runProcess(process, 15, gateLines, true);
+            } catch (RuntimeException error) {
+                log("AZHJ durable fresh-root guard 실행 오류: " + error.getMessage());
+                return false;
+            }
+            if (gateCode == EXIT_TERMINATION_UNCONFIRMED) {
+                log("AZHJ durable fresh-root guard 종료 상태가 불명확합니다. 이 boot에서 재시도하지 마세요.");
+                return false;
+            }
+
+            String gateOutput = String.join("\\n", gateLines);
+            if (gateOutput.contains("M3Q_AZHJ_ROOT_ATTEMPT_SAME_BOOT:")) {
+                log("AZHJ durable same-boot receipt가 이미 존재합니다. 재부팅 전 fresh-root를 차단합니다.");
+                return false;
+            }
+            if (gateOutput.contains("M3Q_AZHJ_ROOT_ATTEMPT_PROVENANCE_INVALID:")
+                    || gateOutput.contains("M3Q_AZHJ_ROOT_ATTEMPT_BOOT_MISMATCH")) {
+                log("AZHJ durable attempt evidence provenance를 검증하지 못했습니다.");
+                return false;
+            }
+
+            String expectedReceipt = "M3Q_AZHJ_ROOT_ATTEMPT_ARMED:" + bootId;
+            int receiptCount = 0;
+            for (String line : gateLines) {
+                if (expectedReceipt.equals(line)) receiptCount++;
+            }
+            if (gateCode != 0 || receiptCount != 1) {
+                log("AZHJ durable fresh-root guard의 유일한 terminal receipt를 확인하지 못했습니다. code="
+                        + gateCode + " receipts=" + receiptCount);
+                return false;
+            }
+
+            if (!prefs.edit().putString(ATTEMPT_BOOT_ID, bootId).commit()) {
+                log("AZHJ durable receipt는 기록됐지만 app-local receipt 저장에 실패했습니다. "
+                        + "안전을 위해 이 boot를 소비한 것으로 처리합니다.");
+                return false;
+            }
+            log("AZHJ durable fresh-root attempt armed boot=" + bootId);
+            return true;
+        }
+    }'''
 
 AZHJ_ACTIVATE_METHOD = '''    private int activateKernelSu(File helper, File ksud) {
         if (!helper.isFile() || !ksud.isFile()) {
@@ -132,13 +253,13 @@ def replace_exact(text: str, old: str, new: str, expected_count: int = 1) -> str
 
 def replace_region_exact(text: str, start: str, end: str, replacement: str) -> str:
     if text.count(start) != 1:
-        raise SystemExit(f"FAIL: activation method start cardinality={text.count(start)}")
+        raise SystemExit(f"FAIL: region start cardinality={text.count(start)} for {start!r}")
     if text.count(end) != 1:
-        raise SystemExit(f"FAIL: activation method end cardinality={text.count(end)}")
+        raise SystemExit(f"FAIL: region end cardinality={text.count(end)} for {end!r}")
     begin = text.index(start)
     finish = text.index(end, begin)
     if finish <= begin:
-        raise SystemExit("FAIL: activation method boundary order invalid")
+        raise SystemExit("FAIL: replacement region boundary order invalid")
     return text[:begin] + replacement + "\n\n" + text[finish:]
 
 
@@ -162,6 +283,9 @@ def main() -> int:
     text = replace_exact(text, "AZG3 root-single", "AZHJ root-single", expected_count=2)
     text = replace_exact(text, KSU_READY_ANCHOR, KSU_READY_OVERLAY)
     text = replace_region_exact(
+        text, ATTEMPT_METHOD_START, ATTEMPT_METHOD_END, AZHJ_ATTEMPT_METHOD
+    )
+    text = replace_region_exact(
         text, ACTIVATE_METHOD_START, ACTIVATE_METHOD_END, AZHJ_ACTIVATE_METHOD
     )
 
@@ -181,6 +305,18 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ journal-absent receipt cardinality mismatch")
     if text.count("M3Q_AZHJ_PRIOR_BOOT_JOURNAL:") != 2:
         raise SystemExit("FAIL: AZHJ prior-boot journal receipt cardinality mismatch")
+    if text.count("/data/local/tmp/m3q-azhj-root-attempt.log") != 1:
+        raise SystemExit("FAIL: AZHJ durable root-attempt marker path cardinality mismatch")
+    if text.count("M3Q_AZHJ_ROOT_ATTEMPT_ARMED:") != 2:
+        raise SystemExit("FAIL: AZHJ durable root-attempt armed receipt cardinality mismatch")
+    if text.count("M3Q_AZHJ_ROOT_ATTEMPT_SAME_BOOT:") != 2:
+        raise SystemExit("FAIL: AZHJ durable same-boot guard cardinality mismatch")
+    if text.count("M3Q_AZHJ_ROOT_ATTEMPT_PROVENANCE_INVALID:") != 2:
+        raise SystemExit("FAIL: AZHJ durable attempt provenance guard cardinality mismatch")
+    if text.count("M3Q_AZHJ_ROOT_ATTEMPT_BOOT_MISMATCH") != 2:
+        raise SystemExit("FAIL: AZHJ durable boot-id cross-check cardinality mismatch")
+    if text.count("Shizuku durable fresh-root guard") != 0:
+        raise SystemExit("FAIL: impossible sentinel")
     if "recover with KernelSU activation only" in text:
         raise SystemExit("FAIL: stale same-boot recovery guidance remains")
     if "KernelSU 3.2.5 LKM late-load daemon 검증 완료" in text:
@@ -199,6 +335,7 @@ def main() -> int:
     encoded = text.encode("utf-8")
     args.engine.write_bytes(encoded)
     print(f"ENGINE_AZHJ_SHA256={hashlib.sha256(encoded).hexdigest()}")
+    print("AZHJ_DURABLE_ROOT_ATTEMPT_GUARD_OVERLAY=PASS")
 
     gradle_raw = args.gradle.read_bytes()
     gradle_blob = git_blob_sha1(gradle_raw)
