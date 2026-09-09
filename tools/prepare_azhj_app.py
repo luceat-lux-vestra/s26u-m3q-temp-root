@@ -13,7 +13,7 @@ AZG3_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSS4AZG3-4k"
 AZHJ_KERNEL = "6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k"
 AZG3_FIRMWARE = "S948NKSS4AZG3_OKR4AZG3"
 AZHJ_FIRMWARE = "S948NKSU4AZHJ_OKR4AZHJ"
-ACTIVATE_ANCHOR = '        status("KernelSU 구성 확인 중", STATUS_WORKING);'
+ACTIVATE_ANCHOR = '        log("KernelSU loader SHA-256 일치");'
 KSU_READY_ANCHOR = '''        if (kernelSu) {
             markKernelSuVerifiedForThisBoot();
             return new RootState(true, false, false, ksuOutput);
@@ -36,13 +36,36 @@ GRADLE_RELEASE_OVERLAY = '''        release {
             signingConfig = signingConfigs.debug
         }'''
 
-ACTIVATE_OVERLAY = '''        int moduleCode = AzhjKernelSuPreloader.ensureLoaded(context, helper, ksud);
-        if (moduleCode != 0) {
-            log("AZHJ KernelSU module pre-load 실패 code=" + moduleCode);
-            return moduleCode;
-        }
+MODULE_SHA256 = "e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7"
+KSU_CONTROL_MARKER = "KernelSU control verified version=32525"
 
-        status("KernelSU 구성 확인 중", STATUS_WORKING);'''
+ACTIVATE_OVERLAY = f'''        RootState moduleState = checkRoot(true);
+        if (moduleState.terminationUnconfirmed()) {{
+            return EXIT_TERMINATION_UNCONFIRMED;
+        }}
+        boolean moduleControlReady = moduleState.output().contains(
+                "{KSU_CONTROL_MARKER}");
+        if (!moduleControlReady) {{
+            int moduleCode = AzhjKernelSuPreloader.ensureLoaded(context, helper, ksud);
+            if (moduleCode != 0) {{
+                log("AZHJ KernelSU module pre-load 실패 code=" + moduleCode);
+                return moduleCode;
+            }}
+
+            moduleState = checkRoot(true);
+            if (moduleState.terminationUnconfirmed()) {{
+                return EXIT_TERMINATION_UNCONFIRMED;
+            }}
+            if (!moduleState.output().contains("{KSU_CONTROL_MARKER}")) {{
+                log("AZHJ KernelSU module insmod 후 control 검증 실패");
+                return 125;
+            }}
+            log("M3Q_AZHJ_KSU_MODULE_OK:{MODULE_SHA256}");
+        }} else {{
+            log("M3Q_AZHJ_KSU_ALREADY_LOADED");
+        }}
+
+        log("KernelSU loader SHA-256 일치");'''
 
 
 def git_blob_sha1(data: bytes) -> str:
@@ -86,6 +109,10 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ KernelSU preload hook cardinality mismatch")
     if text.count("AZHJ KernelSU control detected without late-load receipt") != 1:
         raise SystemExit("FAIL: AZHJ KernelSU recovery-state overlay cardinality mismatch")
+    if text.count("M3Q_AZHJ_KSU_MODULE_OK:" + MODULE_SHA256) != 1:
+        raise SystemExit("FAIL: AZHJ post-insmod control receipt marker cardinality mismatch")
+    if text.count(KSU_CONTROL_MARKER) < 2:
+        raise SystemExit("FAIL: AZHJ pre/post-insmod control probes are missing")
     if "markKernelSuVerifiedForThisBoot();\n            return new RootState(true" in text:
         raise SystemExit("FAIL: AZHJ checkRoot still self-issues a KernelSU ready receipt")
     if AZHJ_KERNEL not in text or AZHJ_FIRMWARE not in text:

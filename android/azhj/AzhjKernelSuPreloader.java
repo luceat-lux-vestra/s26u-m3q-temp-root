@@ -75,19 +75,12 @@ final class AzhjKernelSuPreloader {
 
     private static int runInsmod(Context context, File helper, File ksud, File module) {
         String command = "set -eu\n"
-                + "helper=" + shellQuote(helper.getAbsolutePath()) + "\n"
                 + "ksud=" + shellQuote(ksud.getAbsolutePath()) + "\n"
                 + "source_module=" + shellQuote(module.getAbsolutePath()) + "\n"
                 + "stage=" + shellQuote(MODULE_STAGE) + "\n"
                 + "loader=" + shellQuote(KSUD_STAGE) + "\n"
                 + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
                 + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
-                + "cleanup() { rm -f -- \"$stage\" \"$loader\"; }\n"
-                + "trap cleanup EXIT HUP INT TERM\n"
-                + "if \"$helper\" --ksu-info >/dev/null 2>&1; then\n"
-                + "  echo M3Q_AZHJ_KSU_ALREADY_LOADED\n"
-                + "  exit 0\n"
-                + "fi\n"
                 + "ksud_hash=$(sha256sum \"$ksud\"); ksud_hash=${ksud_hash%% *}\n"
                 + "if [ \"$ksud_hash\" != \"$expected_ksud\" ]; then\n"
                 + "  echo M3Q_AZHJ_KSUD_HASH_MISMATCH:$ksud_hash\n"
@@ -127,10 +120,9 @@ final class AzhjKernelSuPreloader {
                 + "if [ \"$alias_hash\" != \"$expected_module\" ]; then "
                 + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_HASH_MISMATCH:$alias_hash; exit 125; fi; "
                 + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_OK:$alias_hash; "
+                + "rm -f -- \"$stage\" \"$loader\"; "
                 + "/system/bin/logcat insmod \"$module_alias\"; "
-                + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n"
-                + "\"$helper\" --ksu-info\n"
-                + "echo M3Q_AZHJ_KSU_MODULE_OK:$module_hash\n";
+                + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n";
 
         ProcessBuilder builder = new ProcessBuilder(
                 helper.getAbsolutePath(), "-c", command);
@@ -165,18 +157,11 @@ final class AzhjKernelSuPreloader {
             if (code != 0) {
                 return code;
             }
-            if (!text.contains("M3Q_AZHJ_KSU_MODULE_OK:" + MODULE_SHA256)
-                    && !text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")) {
-                Log.e(TAG, "AZHJ KernelSU pre-load lacks verified completion marker");
-                return 125;
-            }
-            if (!text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")
-                    && !text.contains("M3Q_AZHJ_KSU_MODULE_ALIAS_OK:" + MODULE_SHA256)) {
+            if (!text.contains("M3Q_AZHJ_KSU_MODULE_ALIAS_OK:" + MODULE_SHA256)) {
                 Log.e(TAG, "AZHJ KernelSU pre-load lacks module-alias completion marker");
                 return 125;
             }
-            if (!text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")
-                    && !text.contains("M3Q_AZHJ_KSU_BIND_EXEC_OK")) {
+            if (!text.contains("M3Q_AZHJ_KSU_BIND_EXEC_OK")) {
                 Log.e(TAG, "AZHJ KernelSU pre-load lacks bind-exec completion marker");
                 return 125;
             }
