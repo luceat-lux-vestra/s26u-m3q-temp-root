@@ -27,6 +27,8 @@ final class AzhjKernelSuPreloader {
     private static final String MODULE_NATIVE_NAME = "libm3qksumodule.so";
     private static final String MODULE_STAGE =
             "/data/local/tmp/kernelsu-m3q-S948NKSU4AZHJ.ko";
+    private static final String KSUD_STAGE =
+            "/data/local/tmp/ksud-m3q-S948NKSU4AZHJ-preload";
     private static final String MODULE_SHA256 =
             "e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7";
     private static final String KSUD_SHA256 =
@@ -77,9 +79,10 @@ final class AzhjKernelSuPreloader {
                 + "ksud=" + shellQuote(ksud.getAbsolutePath()) + "\n"
                 + "source_module=" + shellQuote(module.getAbsolutePath()) + "\n"
                 + "stage=" + shellQuote(MODULE_STAGE) + "\n"
+                + "loader=" + shellQuote(KSUD_STAGE) + "\n"
                 + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
                 + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
-                + "cleanup() { rm -f -- \"$stage\"; }\n"
+                + "cleanup() { rm -f -- \"$stage\" \"$loader\"; }\n"
                 + "trap cleanup EXIT HUP INT TERM\n"
                 + "if \"$helper\" --ksu-info >/dev/null 2>&1; then\n"
                 + "  echo M3Q_AZHJ_KSU_ALREADY_LOADED\n"
@@ -95,15 +98,29 @@ final class AzhjKernelSuPreloader {
                 + "  echo M3Q_AZHJ_KSU_SOURCE_HASH_MISMATCH:$source_hash\n"
                 + "  exit 125\n"
                 + "fi\n"
-                + "rm -f -- \"$stage\"\n"
+                + "rm -f -- \"$stage\" \"$loader\"\n"
                 + "cp \"$source_module\" \"$stage\"\n"
+                + "cp \"$ksud\" \"$loader\"\n"
                 + "chmod 0600 \"$stage\"\n"
+                + "chmod 0755 \"$loader\"\n"
                 + "module_hash=$(sha256sum \"$stage\"); module_hash=${module_hash%% *}\n"
+                + "loader_hash=$(sha256sum \"$loader\"); loader_hash=${loader_hash%% *}\n"
                 + "if [ \"$module_hash\" != \"$expected_module\" ]; then\n"
                 + "  echo M3Q_AZHJ_KSU_STAGE_HASH_MISMATCH:$module_hash\n"
                 + "  exit 125\n"
                 + "fi\n"
-                + "\"$ksud\" insmod \"$stage\"\n"
+                + "if [ \"$loader_hash\" != \"$expected_ksud\" ]; then\n"
+                + "  echo M3Q_AZHJ_KSUD_STAGE_HASH_MISMATCH:$loader_hash\n"
+                + "  exit 125\n"
+                + "fi\n"
+                + "echo M3Q_AZHJ_KSU_STAGE_OK:$module_hash:$loader_hash\n"
+                + "export loader stage\n"
+                + "unshare -m /system/bin/sh -c '"
+                + "set -eu; "
+                + "mount -o rprivate /; "
+                + "mount --bind \"$loader\" /system/bin/logcat; "
+                + "/system/bin/logcat insmod \"$stage\"; "
+                + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n"
                 + "\"$helper\" --ksu-info\n"
                 + "echo M3Q_AZHJ_KSU_MODULE_OK:$module_hash\n";
 
@@ -143,6 +160,11 @@ final class AzhjKernelSuPreloader {
             if (!text.contains("M3Q_AZHJ_KSU_MODULE_OK:" + MODULE_SHA256)
                     && !text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")) {
                 Log.e(TAG, "AZHJ KernelSU pre-load lacks verified completion marker");
+                return 125;
+            }
+            if (!text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")
+                    && !text.contains("M3Q_AZHJ_KSU_BIND_EXEC_OK")) {
+                Log.e(TAG, "AZHJ KernelSU pre-load lacks bind-exec completion marker");
                 return 125;
             }
             return 0;
