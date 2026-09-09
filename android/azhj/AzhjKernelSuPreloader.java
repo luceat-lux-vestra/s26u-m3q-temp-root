@@ -117,7 +117,7 @@ final class AzhjKernelSuPreloader {
                 + "export loader stage\n"
                 + "unshare -m /system/bin/sh -c '"
                 + "set -eu; "
-                + "mount -o rprivate /; "
+                + "mount -o rslave none /; "
                 + "mount --bind \"$loader\" /system/bin/logcat; "
                 + "/system/bin/logcat insmod \"$stage\"; "
                 + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n"
