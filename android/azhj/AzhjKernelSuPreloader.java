@@ -15,7 +15,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
-/** AZHJ-only staged KernelSU activation coordinator injected by the audited build. */
+/** AZHJ-only fresh-boot KernelSU foreground late-load coordinator. */
 final class AzhjKernelSuPreloader {
     private static final String TAG = "M3qRoot-AZHJ";
     private static final String MODEL = "SM-S948N";
@@ -28,41 +28,38 @@ final class AzhjKernelSuPreloader {
     private static final String MODULE_NATIVE_NAME = "libm3qksumodule.so";
     private static final String HELPER_STAGE =
             "/data/local/tmp/m3qroot-helper-S948NKSU4AZHJ";
-    private static final String MODULE_STAGE =
-            "/data/local/tmp/kernelsu-m3q-S948NKSU4AZHJ.ko";
     /* Must match exploit/src/su_daemon.c KSU_LOADER_PATH. */
     private static final String KSU_LOADER_STAGE =
             "/data/local/tmp/ksud-m3q-S948NKSS4AZG3-kdp";
-    private static final String KSU_LATE_STAGE = "/data/local/tmp/.ksud-stage";
+    private static final String MODULE_WITNESS_STAGE =
+            "/data/local/tmp/kernelsu-m3q-S948NKSU4AZHJ.ko";
+    private static final String EMBEDDED_PROBE_STAGE =
+            "/data/local/tmp/.m3q-azhj-embedded-kernelsu.ko";
     private static final String KSU_LOG = "/data/local/tmp/m3q-kernelsu-late-load.log";
     private static final String PHASE_JOURNAL =
             "/data/local/tmp/m3q-azhj-ksu-phase.log";
 
     private static final String HELPER_SHA256 =
-            "a3bc95af6b31a988da0f19b4285c20af31735569dd0c9abd64752e26622bc08f";
+            "f13f2a19d4b6b3154af68a42f8bdbc085e5295cc3700d48b25d514f51f074139";
     private static final String MODULE_SHA256 =
             "e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7";
     private static final String KSUD_SHA256 =
-            "3ce5753203c93f4d733fbc10eebd7a69152189afb1d2a15bfd855bd6b5d4f622";
+            "83c754dcbacf1c5bd96836cc52380dcd5b5c9273e1f6a8bedfde2ddc0b7f3ab4";
 
-    private static final String CONTROL_OK_MARKER =
-            "M3Q_AZHJ_DAEMON_KSU_CONTROL_OK";
-    private static final String CONTROL_FAIL_PREFIX =
-            "M3Q_AZHJ_DAEMON_KSU_CONTROL_FAIL:";
-    private static final String CONTROL_STAGE_MISSING =
-            "M3Q_AZHJ_DAEMON_KSU_CONTROL_STAGE_MISSING";
+    private static final String CONTROL_OK_MARKER = "M3Q_AZHJ_DAEMON_KSU_CONTROL_OK";
+    private static final String CONTROL_FAIL_PREFIX = "M3Q_AZHJ_DAEMON_KSU_CONTROL_FAIL:";
     private static final String CONTROL_EXACT_LINE =
             "KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5";
-    private static final String PHASE_RECEIPT_PREFIX =
-            "M3Q_AZHJ_PHASE_RECORDED:";
+    private static final String PHASE_RECEIPT_PREFIX = "M3Q_AZHJ_PHASE_RECORDED:";
+    private static final String EMBEDDED_RECEIPT_PREFIX =
+            "M3Q_AZHJ_EMBEDDED_MODULE_VERIFIED:";
 
+    private static final int EXIT_REBOOT_REQUIRED = 124;
     private static final int TIMEOUT_STAGE_SECONDS = 30;
-    private static final int TIMEOUT_INSMOD_SECONDS = 60;
     private static final int TIMEOUT_CONTROL_SECONDS = 20;
     private static final int TIMEOUT_LATE_LOAD_SECONDS = 180;
 
-    private AzhjKernelSuPreloader() {
-    }
+    private AzhjKernelSuPreloader() {}
 
     static int activate(Context context, File helper, File ksud) {
         if (!MODEL.equals(Build.MODEL)
@@ -72,28 +69,26 @@ final class AzhjKernelSuPreloader {
             return 126;
         }
         if (!helper.isFile() || !ksud.isFile()) {
-            Log.e(TAG, "required AZHJ KernelSU helper files are missing");
+            Log.e(TAG, "required AZHJ KernelSU files are missing");
             return 126;
         }
 
-        File nativeDir = new File(context.getApplicationInfo().nativeLibraryDir);
-        File module = new File(nativeDir, MODULE_NATIVE_NAME);
-        if (!module.isFile()) {
-            Log.e(TAG, "AZHJ KernelSU native module is missing");
+        File moduleWitness = new File(
+                context.getApplicationInfo().nativeLibraryDir, MODULE_NATIVE_NAME);
+        if (!moduleWitness.isFile()) {
+            Log.e(TAG, "AZHJ KernelSU module witness is missing");
             return 126;
         }
 
         try {
             String helperHash = sha256(helper);
-            String moduleHash = sha256(module);
             String ksudHash = sha256(ksud);
+            String moduleHash = sha256(moduleWitness);
             if (!HELPER_SHA256.equals(helperHash)
-                    || !MODULE_SHA256.equals(moduleHash)
-                    || !KSUD_SHA256.equals(ksudHash)) {
-                Log.e(TAG, "refusing KernelSU activation: packaged hash mismatch "
-                        + "helper=" + helperHash
-                        + " module=" + moduleHash
-                        + " ksud=" + ksudHash);
+                    || !KSUD_SHA256.equals(ksudHash)
+                    || !MODULE_SHA256.equals(moduleHash)) {
+                Log.e(TAG, "refusing KernelSU activation: packaged hash mismatch helper="
+                        + helperHash + " ksud=" + ksudHash + " module=" + moduleHash);
                 return 125;
             }
         } catch (IOException | NoSuchAlgorithmException e) {
@@ -101,152 +96,158 @@ final class AzhjKernelSuPreloader {
             return 125;
         }
 
-        ProbeResult probe = probeDaemonControl(context, helper);
-        if (probe.kind == ProbeKind.FAIL) {
-            Log.e(TAG, "AZHJ bootstrap-daemon KernelSU pre-probe failed code="
-                    + probe.code + " output=" + probe.output);
-            return probe.code;
+        ProbeResult direct = probeDirectControl(context, helper);
+        if (direct.kind == ProbeKind.READY) {
+            Log.e(TAG, "KernelSU already loaded before AZHJ activation; reboot required");
+            return EXIT_REBOOT_REQUIRED;
+        }
+        if (direct.kind != ProbeKind.ABSENT) {
+            Log.e(TAG, "direct KernelSU pre-probe did not prove absence code="
+                    + direct.code + " output=" + direct.output);
+            return direct.code != 0 ? direct.code : 125;
         }
 
-        if (probe.kind == ProbeKind.READY) {
-            int verifyCode = verifyRecoveryStages(context, helper);
-            if (verifyCode != 0) return verifyCode;
-            Log.i(TAG, "M3Q_AZHJ_KSU_ALREADY_LOADED");
-            return runLateLoad(context, helper);
+        int code = stageBootstrapAssets(context, helper, ksud, moduleWitness);
+        if (code != 0) return code;
+
+        code = recordPhase(context, helper, "PRE_LATE_LOAD_CONTROL_PROBE");
+        if (code != 0) return code;
+
+        ProbeResult daemon = probeDaemonControl(context, helper);
+        if (daemon.kind == ProbeKind.READY) {
+            Log.e(TAG, "KernelSU became ready before authorized late-load; reboot required");
+            return EXIT_REBOOT_REQUIRED;
+        }
+        if (daemon.kind != ProbeKind.ABSENT) {
+            Log.e(TAG, "daemon KernelSU pre-probe did not prove absence code="
+                    + daemon.code + " output=" + daemon.output);
+            return daemon.code != 0 ? daemon.code : 125;
         }
 
-        /* Module is absent or no staged daemon-control helper exists yet.
-         * Refresh every bootstrap asset from this exact APK before any write. */
-        int stageCode = stageBootstrapAssets(context, helper, ksud, module);
-        if (stageCode != 0) return stageCode;
+        code = recordPhase(context, helper, "KSU_ABSENT_PROVEN");
+        if (code != 0) return code;
+        code = verifyEmbeddedModule(context, helper);
+        if (code != 0) return code;
+        code = recordPhase(context, helper, "EMBEDDED_MODULE_VERIFIED");
+        if (code != 0) return code;
+        code = recordPhase(context, helper, "PRE_LATE_LOAD");
+        if (code != 0) return code;
 
-        int phaseCode = recordPhase(context, helper, "PRE_INSMOD_CONTROL_PROBE");
-        if (phaseCode != 0) return phaseCode;
+        /* This is the single authorized KernelSU kernel-write entry. The native
+         * helper invokes the custom ksud with --m3q-foreground and returns 0
+         * only after that same ksud process completes late-load and the helper
+         * independently verifies exact KernelSU v32525 control. Do not call the
+         * bootstrap daemon again after this boundary. */
+        CommandResult late = runDirect(
+                context,
+                new String[]{helper.getAbsolutePath(), "--late-load"},
+                TIMEOUT_LATE_LOAD_SECONDS);
+        Log.i(TAG, "AZHJ KernelSU foreground late-load code=" + late.code
+                + " output=" + late.output);
+        if (late.code != 0) return late.code;
 
-        probe = probeDaemonControl(context, helper);
-        if (probe.kind == ProbeKind.READY) {
-            phaseCode = recordPhase(context, helper, "KSU_READY_AFTER_STAGE");
-            if (phaseCode != 0) return phaseCode;
-            int verifyCode = verifyRecoveryStages(context, helper);
-            if (verifyCode != 0) return verifyCode;
-            Log.i(TAG, "M3Q_AZHJ_KSU_ALREADY_LOADED_AFTER_STAGE");
-            return runLateLoad(context, helper);
-        }
-        if (probe.kind != ProbeKind.ABSENT) {
-            Log.e(TAG, "AZHJ daemon control probe did not prove module absence code="
-                    + probe.code + " output=" + probe.output);
-            return probe.code != 0 ? probe.code : 125;
-        }
-
-        phaseCode = recordPhase(context, helper, "KSU_ABSENT_PROVEN");
-        if (phaseCode != 0) return phaseCode;
-        phaseCode = recordPhase(context, helper, "PRE_INSMOD");
-        if (phaseCode != 0) return phaseCode;
-
-        int insmodCode = runInsmod(context, helper);
-        if (insmodCode != 0) return insmodCode;
-
-        phaseCode = recordPhase(context, helper, "INSMOD_RECEIPT_OK");
-        if (phaseCode != 0) return phaseCode;
-        phaseCode = recordPhase(context, helper, "POST_INSMOD_CONTROL_PROBE");
-        if (phaseCode != 0) return phaseCode;
-
-        probe = probeDaemonControl(context, helper);
-        if (probe.kind != ProbeKind.READY) {
-            Log.e(TAG, "AZHJ KernelSU insmod completed without daemon control receipt code="
-                    + probe.code + " output=" + probe.output);
-            return probe.code != 0 ? probe.code : 125;
+        ProbeResult finalProbe = probeDirectControl(context, helper);
+        if (finalProbe.kind != ProbeKind.READY) {
+            Log.e(TAG, "foreground late-load returned without exact final KernelSU control code="
+                    + finalProbe.code + " output=" + finalProbe.output);
+            return finalProbe.code != 0 ? finalProbe.code : 125;
         }
 
-        phaseCode = recordPhase(context, helper, "POST_INSMOD_CONTROL_READY");
-        if (phaseCode != 0) return phaseCode;
-        Log.i(TAG, "M3Q_AZHJ_KSU_MODULE_OK:" + MODULE_SHA256);
-
-        return runLateLoad(context, helper);
+        Log.i(TAG, "M3Q_AZHJ_KSU_FOREGROUND_LATE_LOAD_OK");
+        Log.i(TAG, "M3Q_AZHJ_KSU_READY:" + CONTROL_EXACT_LINE);
+        return 0;
     }
 
     private static int stageBootstrapAssets(
-            Context context, File helper, File ksud, File module) {
+            Context context, File helper, File ksud, File moduleWitness) {
         String command = "set -eu\n"
                 + "helper_src=" + shellQuote(helper.getAbsolutePath()) + "\n"
                 + "ksud_src=" + shellQuote(ksud.getAbsolutePath()) + "\n"
-                + "module_src=" + shellQuote(module.getAbsolutePath()) + "\n"
+                + "module_src=" + shellQuote(moduleWitness.getAbsolutePath()) + "\n"
                 + "helper_stage=" + shellQuote(HELPER_STAGE) + "\n"
                 + "loader_stage=" + shellQuote(KSU_LOADER_STAGE) + "\n"
-                + "late_stage=" + shellQuote(KSU_LATE_STAGE) + "\n"
-                + "module_stage=" + shellQuote(MODULE_STAGE) + "\n"
+                + "module_stage=" + shellQuote(MODULE_WITNESS_STAGE) + "\n"
+                + "probe_stage=" + shellQuote(EMBEDDED_PROBE_STAGE) + "\n"
                 + "late_log=" + shellQuote(KSU_LOG) + "\n"
                 + "journal=" + shellQuote(PHASE_JOURNAL) + "\n"
                 + "expected_helper=" + shellQuote(HELPER_SHA256) + "\n"
                 + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
                 + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
                 + "mkdir -p /data/adb\n"
-                + "rm -f -- \"$helper_stage\" \"$loader_stage\" \"$late_stage\" "
-                + "\"$module_stage\" \"$late_log\" \"$journal\"\n"
+                + "rm -f -- \"$helper_stage\" \"$loader_stage\" \"$module_stage\" "
+                + "\"$probe_stage\" \"$late_log\" \"$journal\"\n"
                 + "boot_id=$(cat /proc/sys/kernel/random/boot_id)\n"
                 + "umask 022\n"
-                + "printf 'SCHEMA=1\\nBOOT_ID=%s\\nHELPER_SHA256=%s\\nKSUD_SHA256=%s\\n"
-                + "MODULE_SHA256=%s\\nPHASE=STAGE_BEGIN\\n' "
+                + "printf 'SCHEMA=2\\nBOOT_ID=%s\\nHELPER_SHA256=%s\\nKSUD_SHA256=%s\\n"
+                + "MODULE_SHA256=%s\\nROUTE=FOREGROUND_EMBEDDED_LATE_LOAD\\nPHASE=STAGE_BEGIN\\n' "
                 + "\"$boot_id\" \"$expected_helper\" \"$expected_ksud\" "
                 + "\"$expected_module\" > \"$journal\"\n"
                 + "chmod 0644 \"$journal\"\n"
                 + "sync\n"
                 + "cp \"$helper_src\" \"$helper_stage\"\n"
                 + "cp \"$ksud_src\" \"$loader_stage\"\n"
-                + "cp \"$ksud_src\" \"$late_stage\"\n"
                 + "cp \"$module_src\" \"$module_stage\"\n"
-                + "chmod 0700 \"$helper_stage\" \"$loader_stage\" \"$late_stage\"\n"
+                + "chmod 0700 \"$helper_stage\" \"$loader_stage\"\n"
                 + "chmod 0600 \"$module_stage\"\n"
                 + "h_helper=$(sha256sum \"$helper_stage\"); h_helper=${h_helper%% *}\n"
                 + "h_loader=$(sha256sum \"$loader_stage\"); h_loader=${h_loader%% *}\n"
-                + "h_late=$(sha256sum \"$late_stage\"); h_late=${h_late%% *}\n"
                 + "h_module=$(sha256sum \"$module_stage\"); h_module=${h_module%% *}\n"
                 + "test \"$h_helper\" = \"$expected_helper\"\n"
                 + "test \"$h_loader\" = \"$expected_ksud\"\n"
-                + "test \"$h_late\" = \"$expected_ksud\"\n"
                 + "test \"$h_module\" = \"$expected_module\"\n"
                 + "printf 'PHASE=BOOTSTRAP_STAGE_OK\\n' >> \"$journal\"\n"
                 + "sync\n"
                 + "echo M3Q_AZHJ_KSU_BOOTSTRAP_STAGE_OK:$h_helper:$h_loader:$h_module\n";
 
-        CommandResult result = runRootCommand(
-                context, helper, command, TIMEOUT_STAGE_SECONDS);
-        Log.i(TAG, "AZHJ bootstrap stage code=" + result.code
-                + " output=" + result.output);
-        if (result.code != 0
-                || !result.output.contains(
-                "M3Q_AZHJ_KSU_BOOTSTRAP_STAGE_OK:"
-                        + HELPER_SHA256 + ":" + KSUD_SHA256 + ":" + MODULE_SHA256)) {
+        CommandResult result = runRootCommand(context, helper, command, TIMEOUT_STAGE_SECONDS);
+        Log.i(TAG, "AZHJ bootstrap stage code=" + result.code + " output=" + result.output);
+        String receipt = "M3Q_AZHJ_KSU_BOOTSTRAP_STAGE_OK:"
+                + HELPER_SHA256 + ":" + KSUD_SHA256 + ":" + MODULE_SHA256;
+        if (result.code != 0 || !result.output.contains(receipt)) {
             Log.e(TAG, "AZHJ bootstrap staging lacks exact completion receipt");
             return result.code != 0 ? result.code : 125;
         }
         return 0;
     }
 
-    private static int verifyRecoveryStages(Context context, File helper) {
+    private static int verifyEmbeddedModule(Context context, File helper) {
         String command = "set -eu\n"
-                + "helper_stage=" + shellQuote(HELPER_STAGE) + "\n"
-                + "loader_stage=" + shellQuote(KSU_LOADER_STAGE) + "\n"
-                + "late_stage=" + shellQuote(KSU_LATE_STAGE) + "\n"
-                + "expected_helper=" + shellQuote(HELPER_SHA256) + "\n"
+                + "loader=" + shellQuote(KSU_LOADER_STAGE) + "\n"
+                + "witness=" + shellQuote(MODULE_WITNESS_STAGE) + "\n"
+                + "extracted=" + shellQuote(EMBEDDED_PROBE_STAGE) + "\n"
+                + "journal=" + shellQuote(PHASE_JOURNAL) + "\n"
                 + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
-                + "h_helper=$(sha256sum \"$helper_stage\"); h_helper=${h_helper%% *}\n"
-                + "h_loader=$(sha256sum \"$loader_stage\"); h_loader=${h_loader%% *}\n"
-                + "h_late=$(sha256sum \"$late_stage\"); h_late=${h_late%% *}\n"
-                + "test \"$h_helper\" = \"$expected_helper\"\n"
-                + "test \"$h_loader\" = \"$expected_ksud\"\n"
-                + "test \"$h_late\" = \"$expected_ksud\"\n"
-                + "echo M3Q_AZHJ_KSU_RECOVERY_STAGE_OK:$h_helper:$h_loader\n";
+                + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
+                + "current_boot=$(cat /proc/sys/kernel/random/boot_id)\n"
+                + "test -f \"$journal\"\n"
+                + "grep -Fqx 'SCHEMA=2' \"$journal\"\n"
+                + "grep -Fqx 'ROUTE=FOREGROUND_EMBEDDED_LATE_LOAD' \"$journal\"\n"
+                + "grep -Fqx \"BOOT_ID=$current_boot\" \"$journal\"\n"
+                + "grep -Fqx \"KSUD_SHA256=$expected_ksud\" \"$journal\"\n"
+                + "grep -Fqx \"MODULE_SHA256=$expected_module\" \"$journal\"\n"
+                + "loader_hash=$(sha256sum \"$loader\"); loader_hash=${loader_hash%% *}\n"
+                + "witness_hash=$(sha256sum \"$witness\"); witness_hash=${witness_hash%% *}\n"
+                + "test \"$loader_hash\" = \"$expected_ksud\"\n"
+                + "test \"$witness_hash\" = \"$expected_module\"\n"
+                + "export loader extracted expected_module\n"
+                + "unshare -m /system/bin/sh -c '"
+                + "set -eu; "
+                + "mount -o rslave none /; "
+                + "mount --bind \"$loader\" /system/bin/logcat; "
+                + "rm -f -- \"$extracted\"; "
+                + "/system/bin/logcat debug extract-binary android16-6.12_kernelsu.ko \"$extracted\"; "
+                + "h=$(sha256sum \"$extracted\"); h=${h%% *}; "
+                + "rm -f -- \"$extracted\"; "
+                + "if [ \"$h\" != \"$expected_module\" ]; then "
+                + "echo M3Q_AZHJ_EMBEDDED_MODULE_HASH_MISMATCH:$h; exit 125; fi; "
+                + "echo " + EMBEDDED_RECEIPT_PREFIX + "$h'\n";
 
-        CommandResult result = runRootCommand(
-                context, helper, command, TIMEOUT_STAGE_SECONDS);
-        Log.i(TAG, "AZHJ recovery stage verify code=" + result.code
+        CommandResult result = runRootCommand(context, helper, command, TIMEOUT_STAGE_SECONDS);
+        Log.i(TAG, "AZHJ embedded module verify code=" + result.code
                 + " output=" + result.output);
         if (result.code != 0
-                || !result.output.contains(
-                "M3Q_AZHJ_KSU_RECOVERY_STAGE_OK:"
-                        + HELPER_SHA256 + ":" + KSUD_SHA256)) {
-            Log.e(TAG, "AZHJ recovery staging receipt missing");
+                || !result.output.contains(EMBEDDED_RECEIPT_PREFIX + MODULE_SHA256)) {
+            Log.e(TAG, "AZHJ embedded KernelSU module lacks exact verification receipt");
             return result.code != 0 ? result.code : 125;
         }
         return 0;
@@ -257,7 +258,6 @@ final class AzhjKernelSuPreloader {
             Log.e(TAG, "invalid AZHJ phase journal token: " + phase);
             return 125;
         }
-
         String receipt = PHASE_RECEIPT_PREFIX + phase;
         String command = "set -eu\n"
                 + "journal=" + shellQuote(PHASE_JOURNAL) + "\n"
@@ -267,7 +267,8 @@ final class AzhjKernelSuPreloader {
                 + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
                 + "current_boot=$(cat /proc/sys/kernel/random/boot_id)\n"
                 + "test -f \"$journal\"\n"
-                + "grep -Fqx 'SCHEMA=1' \"$journal\"\n"
+                + "grep -Fqx 'SCHEMA=2' \"$journal\"\n"
+                + "grep -Fqx 'ROUTE=FOREGROUND_EMBEDDED_LATE_LOAD' \"$journal\"\n"
                 + "grep -Fqx \"BOOT_ID=$current_boot\" \"$journal\"\n"
                 + "grep -Fqx \"HELPER_SHA256=$expected_helper\" \"$journal\"\n"
                 + "grep -Fqx \"KSUD_SHA256=$expected_ksud\" \"$journal\"\n"
@@ -277,8 +278,7 @@ final class AzhjKernelSuPreloader {
                 + "sync\n"
                 + "echo " + shellQuote(receipt) + "\n";
 
-        CommandResult result = runRootCommand(
-                context, helper, command, TIMEOUT_STAGE_SECONDS);
+        CommandResult result = runRootCommand(context, helper, command, TIMEOUT_STAGE_SECONDS);
         Log.i(TAG, "AZHJ phase journal " + phase + " code=" + result.code
                 + " output=" + result.output);
         if (result.code != 0 || !result.output.contains(receipt)) {
@@ -288,85 +288,37 @@ final class AzhjKernelSuPreloader {
         return 0;
     }
 
-    private static int runInsmod(Context context, File helper) {
-        String command = "set -eu\n"
-                + "loader=" + shellQuote(KSU_LOADER_STAGE) + "\n"
-                + "stage=" + shellQuote(MODULE_STAGE) + "\n"
-                + "journal=" + shellQuote(PHASE_JOURNAL) + "\n"
-                + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
-                + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
-                + "current_boot=$(cat /proc/sys/kernel/random/boot_id)\n"
-                + "test -f \"$journal\"\n"
-                + "grep -Fqx \"BOOT_ID=$current_boot\" \"$journal\"\n"
-                + "loader_hash=$(sha256sum \"$loader\"); loader_hash=${loader_hash%% *}\n"
-                + "module_hash=$(sha256sum \"$stage\"); module_hash=${module_hash%% *}\n"
-                + "test \"$loader_hash\" = \"$expected_ksud\"\n"
-                + "test \"$module_hash\" = \"$expected_module\"\n"
-                + "export loader stage expected_module journal\n"
-                + "unshare -m /system/bin/sh -c '"
-                + "set -eu; "
-                + "module_alias=/system/bin/app_process64; "
-                + "if [ ! -f \"$module_alias\" ] || [ -L \"$module_alias\" ]; then "
-                + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_TARGET_INVALID:$module_alias; exit 126; fi; "
-                + "mount -o rslave none /; "
-                + "mount --bind \"$loader\" /system/bin/logcat; "
-                + "mount --bind \"$stage\" \"$module_alias\"; "
-                + "alias_hash=$(sha256sum \"$module_alias\"); alias_hash=${alias_hash%% *}; "
-                + "if [ \"$alias_hash\" != \"$expected_module\" ]; then "
-                + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_HASH_MISMATCH:$alias_hash; exit 125; fi; "
-                + "printf \"PHASE=MODULE_ALIAS_OK\\n\" >> \"$journal\"; sync; "
-                + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_OK:$alias_hash; "
-                + "printf \"PHASE=INSMOD_CALL_BEGIN\\n\" >> \"$journal\"; sync; "
-                + "/system/bin/logcat insmod \"$module_alias\"; "
-                + "printf \"PHASE=INSMOD_RETURNED\\n\" >> \"$journal\"; sync; "
-                + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n";
-
-        CommandResult result = runRootCommand(
-                context, helper, command, TIMEOUT_INSMOD_SECONDS);
-        Log.i(TAG, "AZHJ KernelSU insmod code=" + result.code
-                + " output=" + result.output);
-        if (result.code != 0) return result.code;
-        if (!result.output.contains("M3Q_AZHJ_KSU_MODULE_ALIAS_OK:" + MODULE_SHA256)
-                || !result.output.contains("M3Q_AZHJ_KSU_BIND_EXEC_OK")) {
-            Log.e(TAG, "AZHJ KernelSU insmod lacks exact bind completion receipt");
-            return 125;
-        }
-        return 0;
+    private static ProbeResult probeDirectControl(Context context, File helper) {
+        CommandResult result = runDirect(
+                context,
+                new String[]{helper.getAbsolutePath(), "--ksu-info"},
+                TIMEOUT_CONTROL_SECONDS);
+        Log.i(TAG, "AZHJ direct control probe code=" + result.code + " output=" + result.output);
+        return classifyControl(result.code, result.output);
     }
 
     private static ProbeResult probeDaemonControl(Context context, File helper) {
         String command = "set -u\n"
                 + "helper_stage=" + shellQuote(HELPER_STAGE) + "\n"
                 + "expected_helper=" + shellQuote(HELPER_SHA256) + "\n"
-                + "if [ ! -f \"$helper_stage\" ]; then\n"
-                + "  echo " + CONTROL_STAGE_MISSING + "\n"
-                + "  exit 0\n"
-                + "fi\n"
+                + "if [ ! -f \"$helper_stage\" ]; then "
+                + "echo M3Q_AZHJ_DAEMON_KSU_CONTROL_STAGE_MISSING; exit 0; fi\n"
                 + "h=$(sha256sum \"$helper_stage\"); h=${h%% *}\n"
-                + "if [ \"$h\" != \"$expected_helper\" ]; then\n"
-                + "  echo M3Q_AZHJ_DAEMON_KSU_CONTROL_HELPER_HASH_MISMATCH:$h\n"
-                + "  exit 0\n"
-                + "fi\n"
+                + "if [ \"$h\" != \"$expected_helper\" ]; then "
+                + "echo M3Q_AZHJ_DAEMON_KSU_CONTROL_HELPER_HASH_MISMATCH:$h; exit 0; fi\n"
                 + "export helper_stage\n"
                 + "unshare -m /system/bin/sh -c '"
-                + "set -u; "
-                + "mount -o rslave none / || exit 126; "
+                + "set -u; mount -o rslave none / || exit 126; "
                 + "mount --bind \"$helper_stage\" /system/bin/logcat || exit 126; "
                 + "set +e; output=$(/system/bin/logcat --ksu-info 2>&1); rc=$?; set -e; "
                 + "printf \"%s\\n\" \"$output\"; "
-                + "if [ \"$rc\" -eq 0 ]; then "
-                + "echo " + CONTROL_OK_MARKER + "; "
+                + "if [ \"$rc\" -eq 0 ]; then echo " + CONTROL_OK_MARKER + "; "
                 + "else echo " + CONTROL_FAIL_PREFIX + "$rc; fi'\n";
 
-        CommandResult result = runRootCommand(
-                context, helper, command, TIMEOUT_CONTROL_SECONDS);
-        Log.i(TAG, "AZHJ daemon control probe code=" + result.code
-                + " output=" + result.output);
+        CommandResult result = runRootCommand(context, helper, command, TIMEOUT_CONTROL_SECONDS);
+        Log.i(TAG, "AZHJ daemon control probe code=" + result.code + " output=" + result.output);
         if (result.code != 0) {
             return new ProbeResult(ProbeKind.FAIL, result.code, result.output);
-        }
-        if (result.output.contains(CONTROL_STAGE_MISSING)) {
-            return new ProbeResult(ProbeKind.STAGE_MISSING, 0, result.output);
         }
         if (result.output.contains(CONTROL_OK_MARKER)
                 && result.output.contains(CONTROL_EXACT_LINE)) {
@@ -379,27 +331,14 @@ final class AzhjKernelSuPreloader {
         return new ProbeResult(ProbeKind.FAIL, 125, result.output);
     }
 
-    private static int runLateLoad(Context context, File helper) {
-        int verifyCode = verifyRecoveryStages(context, helper);
-        if (verifyCode != 0) return verifyCode;
-
-        int phaseCode = recordPhase(context, helper, "RECOVERY_STAGE_OK");
-        if (phaseCode != 0) return phaseCode;
-        phaseCode = recordPhase(context, helper, "PRE_LATE_LOAD");
-        if (phaseCode != 0) return phaseCode;
-
-        CommandResult result = runDirect(
-                context,
-                new String[]{helper.getAbsolutePath(), "--late-load"},
-                TIMEOUT_LATE_LOAD_SECONDS);
-        Log.i(TAG, "AZHJ KernelSU late-load code=" + result.code
-                + " output=" + result.output);
-        if (result.code != 0) return result.code;
-
-        /* su_daemon.c returns status 0 only after ksud late-load exits 0 and
-         * verify_kernelsu_control() accepts exact v32525 control. */
-        Log.i(TAG, "M3Q_AZHJ_KSU_LATE_LOAD_OK");
-        return 0;
+    private static ProbeResult classifyControl(int code, String output) {
+        if (code == 0 && output.contains(CONTROL_EXACT_LINE)) {
+            return new ProbeResult(ProbeKind.READY, 0, output);
+        }
+        if (code == 13 && output.contains("KernelSU driver fd unavailable")) {
+            return new ProbeResult(ProbeKind.ABSENT, 13, output);
+        }
+        return new ProbeResult(ProbeKind.FAIL, code != 0 ? code : 125, output);
     }
 
     private static CommandResult runRootCommand(
@@ -422,8 +361,8 @@ final class AzhjKernelSuPreloader {
         try {
             Process process = builder.start();
             ByteArrayOutputStream output = new ByteArrayOutputStream();
-            Thread reader = new Thread(() -> drain(process.getInputStream(), output),
-                    "m3q-azhj-ksu-reader");
+            Thread reader = new Thread(
+                    () -> drain(process.getInputStream(), output), "m3q-azhj-ksu-reader");
             reader.setDaemon(true);
             reader.start();
 
@@ -457,12 +396,7 @@ final class AzhjKernelSuPreloader {
         }
     }
 
-    private enum ProbeKind {
-        READY,
-        ABSENT,
-        STAGE_MISSING,
-        FAIL
-    }
+    private enum ProbeKind { READY, ABSENT, FAIL }
 
     private static final class ProbeResult {
         final ProbeKind kind;
