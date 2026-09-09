@@ -172,6 +172,35 @@ replace_exact(
             if (current.ready()) {''',
         ),
         (
+            '''            if (current.bootstrap()) {
+                append("bootstrap root 감지 · exploit 재실행 없이 KernelSU만 활성화합니다.");
+                setStatus("KernelSU 활성화 중", STATUS_WORKING);
+                setStatusDetail("커널 쓰기를 반복하지 않고 KernelSU 구성을 마무리합니다.");
+                ui.post(this::lockUiForRun);
+                int code = engine.activateKernelSu();
+                append("KernelSU activation exit=" + code);
+                if (code == M3qRootEngine.EXIT_TERMINATION_UNCONFIRMED) {
+                    finishUnconfirmedRun();
+                    return;
+                }
+                finishRun(engine.checkRoot(true));
+                return;
+            }''',
+            '''            if (current.bootstrap()) {
+                running.set(false);
+                ui.post(() -> {
+                    run.setVisibility(View.VISIBLE);
+                    run.setText(R.string.run_reboot_check);
+                    run.setEnabled(false);
+                    setStatus("재부팅 필요", STATUS_WARNING);
+                    setStatusDetail("bootstrap root는 감지됐지만 fresh-root one-shot이 중단된 상태입니다.");
+                    append("AZHJ standalone/bootstrap-only KernelSU activation recovery를 차단했습니다.");
+                    renderDashboard(current);
+                });
+                return;
+            }''',
+        ),
+        (
             '''    private void renderRootState(M3qRootEngine.RootState state) {
         if (state.terminationUnconfirmed()) {
             run.setVisibility(View.VISIBLE);
@@ -195,6 +224,22 @@ replace_exact(
             run.setText(R.string.run_reboot_check);
             run.setEnabled(false);
         } else if (state.ready()) {''',
+        ),
+        (
+            '''        } else if (state.bootstrap()) {
+            run.setVisibility(View.VISIBLE);
+            setStatus("루트 준비됨", STATUS_WORKING);
+            setStatusDetail("KernelSU 활성화 단계만 남아 있습니다.");
+            run.setText(R.string.run_kernel_su_activate);
+            run.setEnabled(true);
+        } else if (engine.hasAttemptedThisBoot()) {''',
+            '''        } else if (state.bootstrap()) {
+            run.setVisibility(View.VISIBLE);
+            setStatus("재부팅 필요", STATUS_WARNING);
+            setStatusDetail("bootstrap root는 감지됐지만 fresh-root one-shot이 중단된 상태입니다.");
+            run.setText(R.string.run_reboot_check);
+            run.setEnabled(false);
+        } else if (engine.hasAttemptedThisBoot()) {''',
         ),
     ],
 )
@@ -223,6 +268,12 @@ if activity_text.count(dirty_marker) != 2:
     raise SystemExit("FAIL: MainActivity dirty-KSU terminal/refresh guard cardinality mismatch")
 if activity_text.index(dirty_marker) > activity_text.index("if (current.ready())"):
     raise SystemExit("FAIL: dirty-KSU terminal guard must precede ready/bootstrap routing")
+if "engine.activateKernelSu()" in activity_text:
+    raise SystemExit("FAIL: transformed AZHJ UI still exposes standalone KernelSU activation")
+if "exploit 재실행 없이 KernelSU만 활성화합니다." in activity_text:
+    raise SystemExit("FAIL: stale bootstrap activation-only recovery guidance remains")
+if activity_text.count("bootstrap root는 감지됐지만 fresh-root one-shot이 중단된 상태입니다.") != 2:
+    raise SystemExit("FAIL: bootstrap interruption reboot-required UI cardinality mismatch")
 render_start = activity_text.index(
     "    private void renderRootState(M3qRootEngine.RootState state) {"
 )
@@ -234,9 +285,12 @@ if render_text.count(dirty_marker) != 1:
     raise SystemExit("FAIL: renderRootState dirty-KSU guard cardinality mismatch")
 if render_text.index(dirty_marker) > render_text.index("} else if (state.ready())"):
     raise SystemExit("FAIL: renderRootState dirty-KSU guard must precede ready/bootstrap routing")
+if "R.string.run_kernel_su_activate" in render_text:
+    raise SystemExit("FAIL: renderRootState still offers bootstrap activation-only action")
 print("AZHJ_UI_SOURCE_OVERLAY=PASS")
 print("AZHJ_DIRTY_KSU_UI_TERMINAL_GATE=PASS")
 print("AZHJ_DIRTY_KSU_UI_REFRESH_GATE=PASS")
+print("AZHJ_BOOTSTRAP_RECOVERY_DISABLED_GATE=PASS")
 PY
 
 cp "$preloader_template" "$preloader_dest"
@@ -310,7 +364,9 @@ for marker in \
   'M3Q_AZHJ_KSU_FOREGROUND_LATE_LOAD_OK' \
   'M3Q_AZHJ_KSU_READY:' \
   'M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT' \
-  'KernelSU 3.2.5 LKM foreground late-load 검증 완료'
+  'M3Q_AZHJ_STANDALONE_ACTIVATION_DISABLED:REBOOT_REQUIRED' \
+  'KernelSU 3.2.5 LKM foreground late-load 검증 완료' \
+  'bootstrap root는 감지됐지만 fresh-root one-shot이 중단된 상태입니다.'
 do
   if ! grep -aFq "$marker" "$extract"/classes*.dex; then
     echo "FAIL: AZHJ foreground handoff artifact marker missing: $marker" >&2
@@ -334,7 +390,9 @@ for stale in \
   'M3Q_AZHJ_KSU_ALREADY_LOADED' \
   '.m3q-azhj-embedded-kernelsu.ko' \
   'extract-binary' \
-  'EMBEDDED_MODULE_VERIFIED'
+  'EMBEDDED_MODULE_VERIFIED' \
+  'exploit 재실행 없이 KernelSU만 활성화합니다.' \
+  'KernelSU activation exit='
 do
   if grep -aFq "$stale" "$extract"/classes*.dex; then
     echo "FAIL: stale AZHJ DEX marker remains: $stale" >&2
@@ -348,6 +406,7 @@ fi
 echo 'AZHJ_FOREGROUND_HANDOFF_ARTIFACT_GATE=PASS'
 echo 'AZHJ_FOREGROUND_IN_MEMORY_MODULE_GATE=PASS'
 echo 'AZHJ_DIRTY_KSU_REBOOT_REQUIRED_ARTIFACT_GATE=PASS'
+echo 'AZHJ_STANDALONE_ACTIVATION_DISABLED_ARTIFACT_GATE=PASS'
 
 grep -aFq '이 앱은 SM-S948N AZHJ 펌웨어에서만 실행할 수 있습니다.' "$extract"/classes*.dex
 grep -aFq '정확한 SM-S948N AZHJ 빌드에서만 실행할 수 있습니다.' "$extract"/classes*.dex
@@ -402,6 +461,8 @@ AZHJ_NATIVE_HELPER_FOREGROUND_COMPLETION_GATE=PASS
 AZHJ_DIRTY_KSU_REBOOT_REQUIRED_GATE=PASS
 AZHJ_FINAL_PRE_EXPLOIT_STATE_GATE=PASS
 AZHJ_DIRTY_KSU_UI_REFRESH_GATE=PASS
+AZHJ_STANDALONE_ACTIVATION_DISABLED_GATE=PASS
+AZHJ_BOOTSTRAP_RECOVERY_DISABLED_GATE=PASS
 AZHJ_FOREGROUND_HANDOFF_ARTIFACT_GATE=PASS
 APK_SHA256=$apk_hash
 APK_SIGNATURE_GATE=PASS
