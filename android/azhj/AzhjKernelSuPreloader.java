@@ -120,7 +120,6 @@ final class AzhjKernelSuPreloader {
                 + "if [ \"$alias_hash\" != \"$expected_module\" ]; then "
                 + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_HASH_MISMATCH:$alias_hash; exit 125; fi; "
                 + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_OK:$alias_hash; "
-                + "rm -f -- \"$stage\" \"$loader\"; "
                 + "/system/bin/logcat insmod \"$module_alias\"; "
                 + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n";
 
