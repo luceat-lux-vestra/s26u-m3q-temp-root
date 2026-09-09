@@ -23,8 +23,8 @@ KSU_READY_OVERLAY = '''        if (kernelSu && hasVerifiedKernelSuThisBoot()) {
             return new RootState(true, false, false, ksuOutput);
         }
         if (kernelSu && verbose) {
-            log("AZHJ KernelSU control detected without late-load receipt; "
-                    + "recover with KernelSU activation only");
+            log("AZHJ KernelSU control detected without current foreground late-load receipt; "
+                    + "reboot required before retry");
         }'''
 GRADLE_RELEASE_ANCHOR = '''        release {
             minifyEnabled false
@@ -46,23 +46,30 @@ AZHJ_ACTIVATE_METHOD = '''    private int activateKernelSu(File helper, File ksu
         status("KernelSU 활성화 중", STATUS_WORKING);
         int code = AzhjKernelSuPreloader.activate(context, helper, ksud);
         if (code == EXIT_TERMINATION_UNCONFIRMED) {
-            log("AZHJ KernelSU daemon handoff 종료 상태를 확인하지 못했습니다.");
+            log("AZHJ KernelSU foreground late-load 종료 상태를 확인하지 못했습니다.");
+            return code;
+        }
+        if (code == 124) {
+            log("AZHJ KernelSU가 이미 활성화됐지만 현재 boot의 foreground receipt가 없습니다. "
+                    + "재부팅 후 다시 시도해야 합니다.");
+            appendKernelSuLog(helper);
             return code;
         }
         if (code != 0) {
-            log("AZHJ KernelSU daemon handoff 실패 code=" + code);
+            log("AZHJ KernelSU foreground late-load handoff 실패 code=" + code);
             appendKernelSuLog(helper);
             return code;
         }
 
-        /* AzhjKernelSuPreloader returns 0 only after the bootstrap daemon's
-         * --late-load path has completed and daemon-side exact v32525 control
-         * verification has passed. Only then issue this-boot ready receipt. */
+        /* AzhjKernelSuPreloader returns 0 only after the custom foreground ksud
+         * has completed embedded-KO late-load, the native helper has verified
+         * exact v32525 control, and the app has independently re-probed the
+         * same exact control state. Only then issue this-boot ready receipt. */
         if (!markKernelSuVerifiedForThisBoot()) {
-            log("KernelSU는 daemon 검증됐지만 이 boot ID의 영수증을 저장하지 못했습니다.");
+            log("KernelSU는 foreground late-load 검증됐지만 이 boot ID의 영수증을 저장하지 못했습니다.");
             return 123;
         }
-        log("KernelSU 3.2.5 LKM late-load daemon 검증 완료");
+        log("KernelSU 3.2.5 LKM foreground late-load 검증 완료");
         return 0;
     }'''
 
@@ -119,11 +126,15 @@ def main() -> int:
     if AZG3_KERNEL in text or AZG3_FIRMWARE in text:
         raise SystemExit("FAIL: stale AZG3 identity remains in transformed engine")
     if text.count("AzhjKernelSuPreloader.activate(context, helper, ksud)") != 1:
-        raise SystemExit("FAIL: AZHJ daemon handoff hook cardinality mismatch")
-    if text.count("AZHJ KernelSU control detected without late-load receipt") != 1:
-        raise SystemExit("FAIL: AZHJ KernelSU recovery-state overlay cardinality mismatch")
-    if text.count("KernelSU 3.2.5 LKM late-load daemon 검증 완료") != 1:
-        raise SystemExit("FAIL: AZHJ daemon-authoritative ready receipt missing")
+        raise SystemExit("FAIL: AZHJ foreground handoff hook cardinality mismatch")
+    if text.count("AZHJ KernelSU control detected without current foreground late-load receipt") != 1:
+        raise SystemExit("FAIL: AZHJ reboot-required recovery-state overlay cardinality mismatch")
+    if text.count("KernelSU 3.2.5 LKM foreground late-load 검증 완료") != 1:
+        raise SystemExit("FAIL: AZHJ foreground-authoritative ready receipt missing")
+    if "recover with KernelSU activation only" in text:
+        raise SystemExit("FAIL: stale same-boot recovery guidance remains")
+    if "KernelSU 3.2.5 LKM late-load daemon 검증 완료" in text:
+        raise SystemExit("FAIL: stale daemon-authoritative ready receipt remains")
     if "AzhjKernelSuPreloader.ensureLoaded(" in text:
         raise SystemExit("FAIL: stale AZHJ preloader sequencing remains")
     if "KernelSU module insmod 후 control 검증 실패" in text:
