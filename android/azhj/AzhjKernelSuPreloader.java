@@ -35,6 +35,8 @@ final class AzhjKernelSuPreloader {
             "/data/local/tmp/ksud-m3q-S948NKSS4AZG3-kdp";
     private static final String KSU_LATE_STAGE = "/data/local/tmp/.ksud-stage";
     private static final String KSU_LOG = "/data/local/tmp/m3q-kernelsu-late-load.log";
+    private static final String PHASE_JOURNAL =
+            "/data/local/tmp/m3q-azhj-ksu-phase.log";
 
     private static final String HELPER_SHA256 =
             "a3bc95af6b31a988da0f19b4285c20af31735569dd0c9abd64752e26622bc08f";
@@ -51,6 +53,8 @@ final class AzhjKernelSuPreloader {
             "M3Q_AZHJ_DAEMON_KSU_CONTROL_STAGE_MISSING";
     private static final String CONTROL_EXACT_LINE =
             "KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5";
+    private static final String PHASE_RECEIPT_PREFIX =
+            "M3Q_AZHJ_PHASE_RECORDED:";
 
     private static final int TIMEOUT_STAGE_SECONDS = 30;
     private static final int TIMEOUT_INSMOD_SECONDS = 60;
@@ -116,8 +120,13 @@ final class AzhjKernelSuPreloader {
         int stageCode = stageBootstrapAssets(context, helper, ksud, module);
         if (stageCode != 0) return stageCode;
 
+        int phaseCode = recordPhase(context, helper, "PRE_INSMOD_CONTROL_PROBE");
+        if (phaseCode != 0) return phaseCode;
+
         probe = probeDaemonControl(context, helper);
         if (probe.kind == ProbeKind.READY) {
+            phaseCode = recordPhase(context, helper, "KSU_READY_AFTER_STAGE");
+            if (phaseCode != 0) return phaseCode;
             int verifyCode = verifyRecoveryStages(context, helper);
             if (verifyCode != 0) return verifyCode;
             Log.i(TAG, "M3Q_AZHJ_KSU_ALREADY_LOADED_AFTER_STAGE");
@@ -129,8 +138,18 @@ final class AzhjKernelSuPreloader {
             return probe.code != 0 ? probe.code : 125;
         }
 
+        phaseCode = recordPhase(context, helper, "KSU_ABSENT_PROVEN");
+        if (phaseCode != 0) return phaseCode;
+        phaseCode = recordPhase(context, helper, "PRE_INSMOD");
+        if (phaseCode != 0) return phaseCode;
+
         int insmodCode = runInsmod(context, helper);
         if (insmodCode != 0) return insmodCode;
+
+        phaseCode = recordPhase(context, helper, "INSMOD_RECEIPT_OK");
+        if (phaseCode != 0) return phaseCode;
+        phaseCode = recordPhase(context, helper, "POST_INSMOD_CONTROL_PROBE");
+        if (phaseCode != 0) return phaseCode;
 
         probe = probeDaemonControl(context, helper);
         if (probe.kind != ProbeKind.READY) {
@@ -138,6 +157,9 @@ final class AzhjKernelSuPreloader {
                     + probe.code + " output=" + probe.output);
             return probe.code != 0 ? probe.code : 125;
         }
+
+        phaseCode = recordPhase(context, helper, "POST_INSMOD_CONTROL_READY");
+        if (phaseCode != 0) return phaseCode;
         Log.i(TAG, "M3Q_AZHJ_KSU_MODULE_OK:" + MODULE_SHA256);
 
         return runLateLoad(context, helper);
@@ -154,12 +176,21 @@ final class AzhjKernelSuPreloader {
                 + "late_stage=" + shellQuote(KSU_LATE_STAGE) + "\n"
                 + "module_stage=" + shellQuote(MODULE_STAGE) + "\n"
                 + "late_log=" + shellQuote(KSU_LOG) + "\n"
+                + "journal=" + shellQuote(PHASE_JOURNAL) + "\n"
                 + "expected_helper=" + shellQuote(HELPER_SHA256) + "\n"
                 + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
                 + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
                 + "mkdir -p /data/adb\n"
                 + "rm -f -- \"$helper_stage\" \"$loader_stage\" \"$late_stage\" "
-                + "\"$module_stage\" \"$late_log\"\n"
+                + "\"$module_stage\" \"$late_log\" \"$journal\"\n"
+                + "boot_id=$(cat /proc/sys/kernel/random/boot_id)\n"
+                + "umask 022\n"
+                + "printf 'SCHEMA=1\\nBOOT_ID=%s\\nHELPER_SHA256=%s\\nKSUD_SHA256=%s\\n"
+                + "MODULE_SHA256=%s\\nPHASE=STAGE_BEGIN\\n' "
+                + "\"$boot_id\" \"$expected_helper\" \"$expected_ksud\" "
+                + "\"$expected_module\" > \"$journal\"\n"
+                + "chmod 0644 \"$journal\"\n"
+                + "sync\n"
                 + "cp \"$helper_src\" \"$helper_stage\"\n"
                 + "cp \"$ksud_src\" \"$loader_stage\"\n"
                 + "cp \"$ksud_src\" \"$late_stage\"\n"
@@ -174,6 +205,8 @@ final class AzhjKernelSuPreloader {
                 + "test \"$h_loader\" = \"$expected_ksud\"\n"
                 + "test \"$h_late\" = \"$expected_ksud\"\n"
                 + "test \"$h_module\" = \"$expected_module\"\n"
+                + "printf 'PHASE=BOOTSTRAP_STAGE_OK\\n' >> \"$journal\"\n"
+                + "sync\n"
                 + "echo M3Q_AZHJ_KSU_BOOTSTRAP_STAGE_OK:$h_helper:$h_loader:$h_module\n";
 
         CommandResult result = runRootCommand(
@@ -219,17 +252,57 @@ final class AzhjKernelSuPreloader {
         return 0;
     }
 
+    private static int recordPhase(Context context, File helper, String phase) {
+        if (!phase.matches("[A-Z0-9_]+")) {
+            Log.e(TAG, "invalid AZHJ phase journal token: " + phase);
+            return 125;
+        }
+
+        String receipt = PHASE_RECEIPT_PREFIX + phase;
+        String command = "set -eu\n"
+                + "journal=" + shellQuote(PHASE_JOURNAL) + "\n"
+                + "phase=" + shellQuote(phase) + "\n"
+                + "expected_helper=" + shellQuote(HELPER_SHA256) + "\n"
+                + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
+                + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
+                + "current_boot=$(cat /proc/sys/kernel/random/boot_id)\n"
+                + "test -f \"$journal\"\n"
+                + "grep -Fqx 'SCHEMA=1' \"$journal\"\n"
+                + "grep -Fqx \"BOOT_ID=$current_boot\" \"$journal\"\n"
+                + "grep -Fqx \"HELPER_SHA256=$expected_helper\" \"$journal\"\n"
+                + "grep -Fqx \"KSUD_SHA256=$expected_ksud\" \"$journal\"\n"
+                + "grep -Fqx \"MODULE_SHA256=$expected_module\" \"$journal\"\n"
+                + "printf 'PHASE=%s\\n' \"$phase\" >> \"$journal\"\n"
+                + "chmod 0644 \"$journal\"\n"
+                + "sync\n"
+                + "echo " + shellQuote(receipt) + "\n";
+
+        CommandResult result = runRootCommand(
+                context, helper, command, TIMEOUT_STAGE_SECONDS);
+        Log.i(TAG, "AZHJ phase journal " + phase + " code=" + result.code
+                + " output=" + result.output);
+        if (result.code != 0 || !result.output.contains(receipt)) {
+            Log.e(TAG, "AZHJ phase journal lacks exact durable receipt for " + phase);
+            return result.code != 0 ? result.code : 125;
+        }
+        return 0;
+    }
+
     private static int runInsmod(Context context, File helper) {
         String command = "set -eu\n"
                 + "loader=" + shellQuote(KSU_LOADER_STAGE) + "\n"
                 + "stage=" + shellQuote(MODULE_STAGE) + "\n"
+                + "journal=" + shellQuote(PHASE_JOURNAL) + "\n"
                 + "expected_ksud=" + shellQuote(KSUD_SHA256) + "\n"
                 + "expected_module=" + shellQuote(MODULE_SHA256) + "\n"
+                + "current_boot=$(cat /proc/sys/kernel/random/boot_id)\n"
+                + "test -f \"$journal\"\n"
+                + "grep -Fqx \"BOOT_ID=$current_boot\" \"$journal\"\n"
                 + "loader_hash=$(sha256sum \"$loader\"); loader_hash=${loader_hash%% *}\n"
                 + "module_hash=$(sha256sum \"$stage\"); module_hash=${module_hash%% *}\n"
                 + "test \"$loader_hash\" = \"$expected_ksud\"\n"
                 + "test \"$module_hash\" = \"$expected_module\"\n"
-                + "export loader stage expected_module\n"
+                + "export loader stage expected_module journal\n"
                 + "unshare -m /system/bin/sh -c '"
                 + "set -eu; "
                 + "module_alias=/system/bin/app_process64; "
@@ -241,8 +314,11 @@ final class AzhjKernelSuPreloader {
                 + "alias_hash=$(sha256sum \"$module_alias\"); alias_hash=${alias_hash%% *}; "
                 + "if [ \"$alias_hash\" != \"$expected_module\" ]; then "
                 + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_HASH_MISMATCH:$alias_hash; exit 125; fi; "
+                + "printf \"PHASE=MODULE_ALIAS_OK\\n\" >> \"$journal\"; sync; "
                 + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_OK:$alias_hash; "
+                + "printf \"PHASE=INSMOD_CALL_BEGIN\\n\" >> \"$journal\"; sync; "
                 + "/system/bin/logcat insmod \"$module_alias\"; "
+                + "printf \"PHASE=INSMOD_RETURNED\\n\" >> \"$journal\"; sync; "
                 + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n";
 
         CommandResult result = runRootCommand(
@@ -306,6 +382,11 @@ final class AzhjKernelSuPreloader {
     private static int runLateLoad(Context context, File helper) {
         int verifyCode = verifyRecoveryStages(context, helper);
         if (verifyCode != 0) return verifyCode;
+
+        int phaseCode = recordPhase(context, helper, "RECOVERY_STAGE_OK");
+        if (phaseCode != 0) return phaseCode;
+        phaseCode = recordPhase(context, helper, "PRE_LATE_LOAD");
+        if (phaseCode != 0) return phaseCode;
 
         CommandResult result = runDirect(
                 context,
