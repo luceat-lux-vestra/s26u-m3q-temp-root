@@ -114,12 +114,20 @@ final class AzhjKernelSuPreloader {
                 + "  exit 125\n"
                 + "fi\n"
                 + "echo M3Q_AZHJ_KSU_STAGE_OK:$module_hash:$loader_hash\n"
-                + "export loader stage\n"
+                + "export loader stage expected_module\n"
                 + "unshare -m /system/bin/sh -c '"
                 + "set -eu; "
+                + "module_alias=/system/bin/app_process64; "
+                + "if [ ! -f \"$module_alias\" ] || [ -L \"$module_alias\" ]; then "
+                + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_TARGET_INVALID:$module_alias; exit 126; fi; "
                 + "mount -o rslave none /; "
                 + "mount --bind \"$loader\" /system/bin/logcat; "
-                + "/system/bin/logcat insmod \"$stage\"; "
+                + "mount --bind \"$stage\" \"$module_alias\"; "
+                + "alias_hash=$(sha256sum \"$module_alias\"); alias_hash=${alias_hash%% *}; "
+                + "if [ \"$alias_hash\" != \"$expected_module\" ]; then "
+                + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_HASH_MISMATCH:$alias_hash; exit 125; fi; "
+                + "echo M3Q_AZHJ_KSU_MODULE_ALIAS_OK:$alias_hash; "
+                + "/system/bin/logcat insmod \"$module_alias\"; "
                 + "echo M3Q_AZHJ_KSU_BIND_EXEC_OK'\n"
                 + "\"$helper\" --ksu-info\n"
                 + "echo M3Q_AZHJ_KSU_MODULE_OK:$module_hash\n";
@@ -160,6 +168,11 @@ final class AzhjKernelSuPreloader {
             if (!text.contains("M3Q_AZHJ_KSU_MODULE_OK:" + MODULE_SHA256)
                     && !text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")) {
                 Log.e(TAG, "AZHJ KernelSU pre-load lacks verified completion marker");
+                return 125;
+            }
+            if (!text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")
+                    && !text.contains("M3Q_AZHJ_KSU_MODULE_ALIAS_OK:" + MODULE_SHA256)) {
+                Log.e(TAG, "AZHJ KernelSU pre-load lacks module-alias completion marker");
                 return 125;
             }
             if (!text.contains("M3Q_AZHJ_KSU_ALREADY_LOADED")
