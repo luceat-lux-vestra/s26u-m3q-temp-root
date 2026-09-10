@@ -135,7 +135,6 @@ def main() -> int:
         "    private static int recordPhase(Context context, File helper, String phase) {",
         "obsolete filesystem embedded-module verifier",
     )
-
     text = replace_exact(
         text,
         '                + "probe_stage=" + shellQuote(EMBEDDED_PROBE_STAGE) + "\\n"\n',
@@ -149,6 +148,52 @@ def main() -> int:
         "obsolete filesystem probe cleanup reference",
     )
 
+    text = replace_exact(
+        text,
+        '''        if (result.output.contains(CONTROL_OK_MARKER)
+                && result.output.contains(CONTROL_EXACT_LINE)) {
+            return new ProbeResult(ProbeKind.READY, 0, result.output);
+        }
+        if (result.output.contains(CONTROL_FAIL_PREFIX + "13")
+                && result.output.contains("KernelSU driver fd unavailable")) {
+            return new ProbeResult(ProbeKind.ABSENT, 13, result.output);
+        }
+        return new ProbeResult(ProbeKind.FAIL, 125, result.output);
+''',
+        '''        int okMarkers = 0;
+        int failMarkers = 0;
+        int fail13Markers = 0;
+        int exactReadyLines = 0;
+        int exactAbsentLines = 0;
+        int controlFailLines = 0;
+        for (String line : result.output.split("\\\\R")) {
+            if (CONTROL_OK_MARKER.equals(line)) okMarkers++;
+            if (line.startsWith(CONTROL_FAIL_PREFIX)) failMarkers++;
+            if ((CONTROL_FAIL_PREFIX + "13").equals(line)) fail13Markers++;
+            if (CONTROL_EXACT_LINE.equals(line)) exactReadyLines++;
+            if ("KernelSU driver fd unavailable".equals(line)) exactAbsentLines++;
+            if (line.startsWith("KernelSU control failed ")) controlFailLines++;
+        }
+        if (okMarkers == 1
+                && failMarkers == 0
+                && exactReadyLines == 1
+                && exactAbsentLines == 0
+                && controlFailLines == 0) {
+            return new ProbeResult(ProbeKind.READY, 0, result.output);
+        }
+        if (okMarkers == 0
+                && failMarkers == 1
+                && fail13Markers == 1
+                && exactReadyLines == 0
+                && exactAbsentLines == 1
+                && controlFailLines == 0) {
+            return new ProbeResult(ProbeKind.ABSENT, 13, result.output);
+        }
+        return new ProbeResult(ProbeKind.FAIL, 125, result.output);
+''',
+        "daemon KernelSU exact receipt classification",
+    )
+
     # Semantic fail-closed audit of the transformed source. The historical
     # extraction path must be absent from DEX, not merely dormant.
     forbidden = [
@@ -160,10 +205,12 @@ def main() -> int:
         "EMBEDDED_PROBE_STAGE",
         ".m3q-azhj-embedded-kernelsu.ko",
         "M3Q_AZHJ_EMBEDDED_MODULE_HASH_MISMATCH",
+        "result.output.contains(CONTROL_OK_MARKER)",
+        'result.output.contains(CONTROL_FAIL_PREFIX + "13")',
     ]
     for token in forbidden:
         if token in text:
-            raise SystemExit(f"FAIL: stale Java filesystem module-proof token remains: {token}")
+            raise SystemExit(f"FAIL: stale Java filesystem/probe token remains: {token}")
 
     required = [
         expected_ksud,
@@ -172,6 +219,12 @@ def main() -> int:
         "PRE_LATE_LOAD",
         "ROUTE=FOREGROUND_EMBEDDED_LATE_LOAD",
         "--late-load",
+        'result.output.split("\\\\R")',
+        "int exactReadyLines = 0;",
+        "int exactAbsentLines = 0;",
+        "int fail13Markers = 0;",
+        '"KernelSU driver fd unavailable".equals(line)',
+        'line.startsWith("KernelSU control failed ")',
     ]
     for token in required:
         if token not in text:
@@ -185,12 +238,15 @@ def main() -> int:
         'new String[]{helper.getAbsolutePath(), "--late-load"}'
     ):
         raise SystemExit("FAIL: PRE_LATE_LOAD must precede the single late-load entry")
+    if text.count("okMarkers == 1") != 1 or text.count("fail13Markers == 1") != 1:
+        raise SystemExit("FAIL: daemon KernelSU exact terminal-cardinality gate mismatch")
 
     path.write_text(text, encoding="utf-8")
     print(f"AZHJ_PRELOADER_PATCHED_SHA256={hashlib.sha256(path.read_bytes()).hexdigest()}")
     print(f"AZHJ_PRELOADER_EXPECTED_KSUD_SHA256={expected_ksud}")
     print("AZHJ_PRELOADER_FILESYSTEM_EXTRACT_REMOVED=PASS")
     print("AZHJ_PRELOADER_IN_MEMORY_HANDOFF_CONTRACT=PASS")
+    print("AZHJ_PRELOADER_STRICT_DAEMON_KSU_PROBE=PASS")
     return 0
 
 
