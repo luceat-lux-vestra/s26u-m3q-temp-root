@@ -164,20 +164,26 @@ def main() -> int:
         int failMarkers = 0;
         int fail13Markers = 0;
         int exactReadyLines = 0;
+        int readyFamilyLines = 0;
         int exactAbsentLines = 0;
+        int absentFamilyLines = 0;
         int controlFailLines = 0;
         for (String line : result.output.split("\\\\R")) {
             if (CONTROL_OK_MARKER.equals(line)) okMarkers++;
             if (line.startsWith(CONTROL_FAIL_PREFIX)) failMarkers++;
             if ((CONTROL_FAIL_PREFIX + "13").equals(line)) fail13Markers++;
+            if (line.startsWith("KernelSU control verified ")) readyFamilyLines++;
             if (CONTROL_EXACT_LINE.equals(line)) exactReadyLines++;
+            if (line.startsWith("KernelSU driver fd unavailable")) absentFamilyLines++;
             if ("KernelSU driver fd unavailable".equals(line)) exactAbsentLines++;
             if (line.startsWith("KernelSU control failed ")) controlFailLines++;
         }
         if (okMarkers == 1
                 && failMarkers == 0
                 && exactReadyLines == 1
+                && readyFamilyLines == 1
                 && exactAbsentLines == 0
+                && absentFamilyLines == 0
                 && controlFailLines == 0) {
             return new ProbeResult(ProbeKind.READY, 0, result.output);
         }
@@ -185,7 +191,9 @@ def main() -> int:
                 && failMarkers == 1
                 && fail13Markers == 1
                 && exactReadyLines == 0
+                && readyFamilyLines == 0
                 && exactAbsentLines == 1
+                && absentFamilyLines == 1
                 && controlFailLines == 0) {
             return new ProbeResult(ProbeKind.ABSENT, 13, result.output);
         }
@@ -222,6 +230,8 @@ def main() -> int:
         'result.output.split("\\\\R")',
         "int exactReadyLines = 0;",
         "int exactAbsentLines = 0;",
+        "int readyFamilyLines = 0;",
+        "int absentFamilyLines = 0;",
         "int fail13Markers = 0;",
         '"KernelSU driver fd unavailable".equals(line)',
         'line.startsWith("KernelSU control failed ")',
@@ -240,6 +250,8 @@ def main() -> int:
         raise SystemExit("FAIL: PRE_LATE_LOAD must precede the single late-load entry")
     if text.count("okMarkers == 1") != 1 or text.count("fail13Markers == 1") != 1:
         raise SystemExit("FAIL: daemon KernelSU exact terminal-cardinality gate mismatch")
+    if text.count("readyFamilyLines == 1") != 1 or text.count("absentFamilyLines == 1") != 1:
+        raise SystemExit("FAIL: daemon KernelSU terminal-family cardinality gate mismatch")
 
     path.write_text(text, encoding="utf-8")
     print(f"AZHJ_PRELOADER_PATCHED_SHA256={hashlib.sha256(path.read_bytes()).hexdigest()}")
