@@ -15,6 +15,10 @@ AZG3_FIRMWARE = "S948NKSS4AZG3_OKR4AZG3"
 AZHJ_FIRMWARE = "S948NKSU4AZHJ_OKR4AZHJ"
 REBOOT_REQUIRED_MARKER = "M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT"
 STANDALONE_ACTIVATION_DISABLED_MARKER = "M3Q_AZHJ_STANDALONE_ACTIVATION_DISABLED:REBOOT_REQUIRED"
+KSU_PROBE_UNVERIFIED_MARKER = "M3Q_AZHJ_KSU_PROBE_UNVERIFIED:"
+KSU_READY_EXACT_LINE = "KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5"
+KSU_ABSENT_EXACT_LINE = "KernelSU driver fd unavailable"
+KSU_CONTROL_FAIL_PREFIX = "KernelSU control failed "
 ACTIVATE_METHOD_START = "    private int activateKernelSu(File helper, File ksud) {"
 ACTIVATE_METHOD_END = "    private void appendKernelSuLog(File helper) {"
 ATTEMPT_METHOD_START = "    boolean markAttemptForThisBoot() {"
@@ -26,6 +30,68 @@ PUBLIC_ACTIVATE_OVERLAY = '''    int activateKernelSu() {
         log("M3Q_AZHJ_STANDALONE_ACTIVATION_DISABLED:REBOOT_REQUIRED");
         return 124;
     }'''
+KSU_CLASSIFY_ANCHOR = '''        String ksuOutput = String.join("\\n", ksuLines);
+        if (ksuCode == EXIT_TERMINATION_UNCONFIRMED) {
+            return new RootState(false, false, true, ksuOutput);
+        }
+        boolean kernelSu = ksuCode == 0
+                && ksuOutput.contains("KernelSU control verified version=32525");
+'''
+KSU_CLASSIFY_OVERLAY = '''        String ksuOutput = String.join("\\n", ksuLines);
+        if (ksuCode == EXIT_TERMINATION_UNCONFIRMED) {
+            return new RootState(false, false, true, ksuOutput);
+        }
+
+        if (!authoritativeProbe) {
+            if (hasVerifiedKernelSuThisBoot()) {
+                return new RootState(true, false, false,
+                        "KernelSU control verified by the root daemon for this boot");
+            }
+            if (verbose) {
+                log("AZHJ KernelSU state lacks an authoritative shell probe; refusing fresh-root.");
+            }
+            return new RootState(false, false, true,
+                    "M3Q_AZHJ_KSU_PROBE_UNVERIFIED:NO_AUTHORITATIVE_PROBE\\n" + ksuOutput);
+        }
+
+        int exactReadyReceipts = 0;
+        int exactAbsentReceipts = 0;
+        int controlFailReceipts = 0;
+        for (String line : ksuLines) {
+            if ("KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5".equals(line)) {
+                exactReadyReceipts++;
+            }
+            if ("KernelSU driver fd unavailable".equals(line)) {
+                exactAbsentReceipts++;
+            }
+            if (line.startsWith("KernelSU control failed ")) {
+                controlFailReceipts++;
+            }
+        }
+        boolean kernelSu = ksuCode == 0
+                && exactReadyReceipts == 1
+                && exactAbsentReceipts == 0
+                && controlFailReceipts == 0;
+        boolean kernelSuAbsent = ksuCode == 13
+                && exactAbsentReceipts == 1
+                && exactReadyReceipts == 0
+                && controlFailReceipts == 0;
+        if (!kernelSu && !kernelSuAbsent) {
+            if (verbose) {
+                log("AZHJ KernelSU authoritative probe is ambiguous; code=" + ksuCode
+                        + " ready_receipts=" + exactReadyReceipts
+                        + " absent_receipts=" + exactAbsentReceipts
+                        + " control_fail_receipts=" + controlFailReceipts);
+            }
+            return new RootState(false, false, true,
+                    "M3Q_AZHJ_KSU_PROBE_UNVERIFIED:code=" + ksuCode + "\\n" + ksuOutput);
+        }
+'''
+KSU_FALLBACK_ANCHOR = '''        if (!authoritativeProbe && hasVerifiedKernelSuThisBoot()) {
+            return new RootState(true, false, false,
+                    "KernelSU control verified by the root daemon for this boot");
+        }
+'''
 KSU_READY_ANCHOR = '''        if (kernelSu) {
             markKernelSuVerifiedForThisBoot();
             return new RootState(true, false, false, ksuOutput);
@@ -61,6 +127,10 @@ AZHJ_ATTEMPT_METHOD = '''    boolean markAttemptForThisBoot() {
          * bootstrap root, or uncertain process state appearing after the first
          * status check must stop the exploit before any kernel write begins. */
         RootState preflight = checkRoot(false);
+        if (preflight.output().contains("M3Q_AZHJ_KSU_PROBE_UNVERIFIED:")) {
+            log("AZHJ final pre-exploit KernelSU probe is unverified; refusing fresh-root.");
+            return false;
+        }
         if (preflight.terminationUnconfirmed()) {
             log("AZHJ final pre-exploit state probe termination is unconfirmed; reboot required.");
             return false;
@@ -320,6 +390,8 @@ def main() -> int:
     text = replace_exact(text, AZG3_KERNEL, AZHJ_KERNEL)
     text = replace_exact(text, AZG3_FIRMWARE, AZHJ_FIRMWARE)
     text = replace_exact(text, "AZG3 root-single", "AZHJ root-single", expected_count=2)
+    text = replace_exact(text, KSU_CLASSIFY_ANCHOR, KSU_CLASSIFY_OVERLAY)
+    text = replace_exact(text, KSU_FALLBACK_ANCHOR, "")
     text = replace_exact(text, KSU_READY_ANCHOR, KSU_READY_OVERLAY)
     text = replace_exact(text, PUBLIC_ACTIVATE_ANCHOR, PUBLIC_ACTIVATE_OVERLAY)
     text = replace_region_exact(
@@ -367,6 +439,22 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ durable attempt provenance guard cardinality mismatch")
     if text.count("M3Q_AZHJ_ROOT_ATTEMPT_BOOT_MISMATCH") != 2:
         raise SystemExit("FAIL: AZHJ durable boot-id cross-check cardinality mismatch")
+    if text.count(KSU_PROBE_UNVERIFIED_MARKER) != 3:
+        raise SystemExit("FAIL: AZHJ strict KernelSU unverified-state marker cardinality mismatch")
+    if text.count(KSU_READY_EXACT_LINE) != 1:
+        raise SystemExit("FAIL: AZHJ exact KernelSU ready receipt cardinality mismatch")
+    if text.count(KSU_ABSENT_EXACT_LINE) != 1:
+        raise SystemExit("FAIL: AZHJ exact KernelSU absence receipt cardinality mismatch")
+    if text.count(KSU_CONTROL_FAIL_PREFIX) != 1:
+        raise SystemExit("FAIL: AZHJ KernelSU control-failure discriminator cardinality mismatch")
+    if "ksuOutput.contains(\"KernelSU control verified version=32525\")" in text:
+        raise SystemExit("FAIL: stale substring-only KernelSU ready classification remains")
+    if "if (!authoritativeProbe && hasVerifiedKernelSuThisBoot())" in text:
+        raise SystemExit("FAIL: stale non-authoritative KernelSU fallback remains outside strict classifier")
+    if text.count("exactReadyReceipts == 1") != 1 or text.count("exactAbsentReceipts == 1") != 1:
+        raise SystemExit("FAIL: exact KernelSU terminal receipt cardinality predicates missing")
+    if text.count("ksuCode == 13") != 1:
+        raise SystemExit("FAIL: exact KernelSU absence return-code gate missing")
     if "recover with KernelSU activation only" in text:
         raise SystemExit("FAIL: stale same-boot recovery guidance remains")
     if "KernelSU 3.2.5 LKM late-load daemon 검증 완료" in text:
@@ -386,6 +474,7 @@ def main() -> int:
     args.engine.write_bytes(encoded)
     print(f"ENGINE_AZHJ_SHA256={hashlib.sha256(encoded).hexdigest()}")
     print("AZHJ_DIRTY_KSU_REBOOT_REQUIRED_GATE=PASS")
+    print("AZHJ_STRICT_KSU_PREFLIGHT_GATE=PASS")
     print("AZHJ_FINAL_PRE_EXPLOIT_STATE_GATE=PASS")
     print("AZHJ_STANDALONE_ACTIVATION_DISABLED_GATE=PASS")
     print("AZHJ_DURABLE_ROOT_ATTEMPT_GUARD_OVERLAY=PASS")
