@@ -19,6 +19,22 @@ KSU_PROBE_UNVERIFIED_MARKER = "M3Q_AZHJ_KSU_PROBE_UNVERIFIED:"
 KSU_READY_EXACT_LINE = "KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5"
 KSU_ABSENT_EXACT_LINE = "KernelSU driver fd unavailable"
 KSU_CONTROL_FAIL_PREFIX = "KernelSU control failed "
+CHECKROOT_HELPER_MISSING_ANCHOR = '''        File helper = nativeFile(HELPER);
+        if (!helper.isFile()) {
+            return new RootState(false, false, false, "helper missing");
+        }'''
+CHECKROOT_HELPER_MISSING_OVERLAY = '''        File helper = nativeFile(HELPER);
+        if (!helper.isFile()) {
+            return new RootState(false, false, true,
+                    "M3Q_AZHJ_KSU_PROBE_UNVERIFIED:HELPER_MISSING");
+        }'''
+CHECKROOT_INTERRUPTED_ANCHOR = '''        if (Thread.currentThread().isInterrupted()) {
+            return new RootState(false, false, false, "interrupted");
+        }'''
+CHECKROOT_INTERRUPTED_OVERLAY = '''        if (Thread.currentThread().isInterrupted()) {
+            return new RootState(false, false, true,
+                    "M3Q_AZHJ_KSU_PROBE_UNVERIFIED:INTERRUPTED");
+        }'''
 ACTIVATE_METHOD_START = "    private int activateKernelSu(File helper, File ksud) {"
 ACTIVATE_METHOD_END = "    private void appendKernelSuLog(File helper) {"
 ATTEMPT_METHOD_START = "    boolean markAttemptForThisBoot() {"
@@ -55,11 +71,19 @@ KSU_CLASSIFY_OVERLAY = '''        String ksuOutput = String.join("\\n", ksuLines
         }
 
         int exactReadyReceipts = 0;
+        int readyFamilyReceipts = 0;
         int exactAbsentReceipts = 0;
+        int absentFamilyReceipts = 0;
         int controlFailReceipts = 0;
         for (String line : ksuLines) {
+            if (line.startsWith("KernelSU control verified ")) {
+                readyFamilyReceipts++;
+            }
             if ("KernelSU control verified version=32525 flags=0x5 uapi=2 features=0x5".equals(line)) {
                 exactReadyReceipts++;
+            }
+            if (line.startsWith("KernelSU driver fd unavailable")) {
+                absentFamilyReceipts++;
             }
             if ("KernelSU driver fd unavailable".equals(line)) {
                 exactAbsentReceipts++;
@@ -70,17 +94,21 @@ KSU_CLASSIFY_OVERLAY = '''        String ksuOutput = String.join("\\n", ksuLines
         }
         boolean kernelSu = ksuCode == 0
                 && exactReadyReceipts == 1
+                && readyFamilyReceipts == 1
                 && exactAbsentReceipts == 0
+                && absentFamilyReceipts == 0
                 && controlFailReceipts == 0;
         boolean kernelSuAbsent = ksuCode == 13
                 && exactAbsentReceipts == 1
+                && absentFamilyReceipts == 1
                 && exactReadyReceipts == 0
+                && readyFamilyReceipts == 0
                 && controlFailReceipts == 0;
         if (!kernelSu && !kernelSuAbsent) {
             if (verbose) {
                 log("AZHJ KernelSU authoritative probe is ambiguous; code=" + ksuCode
-                        + " ready_receipts=" + exactReadyReceipts
-                        + " absent_receipts=" + exactAbsentReceipts
+                        + " ready_receipts=" + exactReadyReceipts + "/" + readyFamilyReceipts
+                        + " absent_receipts=" + exactAbsentReceipts + "/" + absentFamilyReceipts
                         + " control_fail_receipts=" + controlFailReceipts);
             }
             return new RootState(false, false, true,
@@ -390,6 +418,8 @@ def main() -> int:
     text = replace_exact(text, AZG3_KERNEL, AZHJ_KERNEL)
     text = replace_exact(text, AZG3_FIRMWARE, AZHJ_FIRMWARE)
     text = replace_exact(text, "AZG3 root-single", "AZHJ root-single", expected_count=2)
+    text = replace_exact(text, CHECKROOT_HELPER_MISSING_ANCHOR, CHECKROOT_HELPER_MISSING_OVERLAY)
+    text = replace_exact(text, CHECKROOT_INTERRUPTED_ANCHOR, CHECKROOT_INTERRUPTED_OVERLAY)
     text = replace_exact(text, KSU_CLASSIFY_ANCHOR, KSU_CLASSIFY_OVERLAY)
     text = replace_exact(text, KSU_FALLBACK_ANCHOR, "")
     text = replace_exact(text, KSU_READY_ANCHOR, KSU_READY_OVERLAY)
@@ -439,8 +469,14 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ durable attempt provenance guard cardinality mismatch")
     if text.count("M3Q_AZHJ_ROOT_ATTEMPT_BOOT_MISMATCH") != 2:
         raise SystemExit("FAIL: AZHJ durable boot-id cross-check cardinality mismatch")
-    if text.count(KSU_PROBE_UNVERIFIED_MARKER) != 3:
+    if text.count(KSU_PROBE_UNVERIFIED_MARKER) != 5:
         raise SystemExit("FAIL: AZHJ strict KernelSU unverified-state marker cardinality mismatch")
+    if text.count("readyFamilyReceipts == 1") != 1 or text.count("absentFamilyReceipts == 1") != 1:
+        raise SystemExit("FAIL: AZHJ KernelSU terminal-family cardinality predicates missing")
+    if "return new RootState(false, false, false, \"helper missing\")" in text:
+        raise SystemExit("FAIL: AZHJ helper-missing preflight still fails open")
+    if "return new RootState(false, false, false, \"interrupted\")" in text:
+        raise SystemExit("FAIL: AZHJ interrupted preflight still fails open")
     if text.count(KSU_READY_EXACT_LINE) != 1:
         raise SystemExit("FAIL: AZHJ exact KernelSU ready receipt cardinality mismatch")
     if text.count(KSU_ABSENT_EXACT_LINE) != 1:
