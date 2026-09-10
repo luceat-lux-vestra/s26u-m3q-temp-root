@@ -1,0 +1,289 @@
+name: AZHJ app build
+
+on:
+  push:
+    branches: [azhj-native-port]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  kernelsu-compat:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min@sha256:4dd088dc94b391c926cf09215e0a5958f3dfe7d8eeed3616f9041224f85b1d1a
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+
+      - name: Build exact AZHJ KernelSU compat module
+        shell: bash
+        run: |
+          set -euo pipefail
+          tools/build_azhj_kernelsu_compat.sh /tmp/kernelsu-azhj-kdp-m3q-compat.ko
+          test "$(sha256sum /tmp/kernelsu-azhj-kdp-m3q-compat.ko | awk '{print $1}')" = \
+            e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azhj-kernelsu-compat-exact
+          path: /tmp/kernelsu-azhj-kdp-m3q-compat.ko
+          if-no-files-found: error
+          retention-days: 14
+
+  ksud-embedded:
+    needs: kernelsu-compat
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install exact Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'ndk;29.0.14206865'
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: azhj-kernelsu-compat-exact
+          path: ${{ runner.temp }}/azhj-ko
+
+      - name: Prove exact foreground embedded ksud reproducibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
+          expected_ko=e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+          expected_ksud=4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8
+          test "$(sha256sum "$ko" | awk '{print $1}')" = "$expected_ko"
+
+          M3Q_KSUD_BUILD_ROOT="$RUNNER_TEMP/ksud-build-a" \
+            bash tools/build_azhj_ksud_embedded.sh \
+              "$ko" "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          M3Q_KSUD_BUILD_ROOT="$RUNNER_TEMP/ksud-build-b-different-absolute-path" \
+            bash tools/build_azhj_ksud_embedded.sh \
+              "$ko" "$RUNNER_TEMP/ksud-azhj-embedded-b"
+
+          hash_a=$(sha256sum "$RUNNER_TEMP/ksud-azhj-embedded-a" | awk '{print $1}')
+          hash_b=$(sha256sum "$RUNNER_TEMP/ksud-azhj-embedded-b" | awk '{print $1}')
+          echo "AZHJ_KSUD_REPRO_HASH_A=$hash_a"
+          echo "AZHJ_KSUD_REPRO_HASH_B=$hash_b"
+          test "$hash_a" = "$hash_b"
+          test "$hash_a" = "$expected_ksud"
+          cmp -s "$RUNNER_TEMP/ksud-azhj-embedded-a" "$RUNNER_TEMP/ksud-azhj-embedded-b"
+          echo 'AZHJ_KSUD_EMBEDDED_REPRODUCIBILITY=PASS'
+
+          python3 tools/audit_azhj_ksud.py --ksud "$RUNNER_TEMP/ksud-azhj-embedded-a"
+          if strings "$RUNNER_TEMP/ksud-azhj-embedded-a" | grep -Eq '/ksud-build-a|/ksud-build-b-different-absolute-path'; then
+            echo 'FAIL: build-root path leaked into ksud binary' >&2
+            exit 125
+          fi
+          cp "$RUNNER_TEMP/ksud-azhj-embedded-a" "$RUNNER_TEMP/ksud-azhj-embedded"
+          echo 'AZHJ_KSUD_FOREGROUND_REPRO_AUDIT=PASS'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azhj-ksud-embedded
+          path: ${{ runner.temp }}/ksud-azhj-embedded
+          if-no-files-found: error
+          retention-days: 14
+
+  app:
+    needs: [kernelsu-compat, ksud-embedded]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+
+      - name: Assert exact review HEAD and overlay source contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          actual=$(git rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+          test "$(git hash-object android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java)" = \
+            76516319bfd3d3a7a03ed308f2dfb791db715f25
+          test "$(git hash-object android/app/build.gradle)" = \
+            f554159032883d83216de48765b3afa713ff4839
+          test "$(git hash-object android/azhj/AzhjKernelSuPreloader.java)" = \
+            579980e209da724c0fba049f608fd9a884df9377
+
+          python3 -m py_compile \
+            tools/audit_azhj_ksud.py \
+            tools/patch_azhj_preloader_inmemory.py \
+            tools/prepare_azhj_app.py
+
+          expected_ksud=4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8
+          grep -Fq "$expected_ksud" android/build-azhj-apk.sh
+
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+
+          cp android/azhj/AzhjKernelSuPreloader.java "$tmp/AzhjKernelSuPreloader.java"
+          python3 tools/patch_azhj_preloader_inmemory.py \
+            "$tmp/AzhjKernelSuPreloader.java" "$expected_ksud"
+          grep -Fq "$expected_ksud" "$tmp/AzhjKernelSuPreloader.java"
+          grep -Fq 'KSU_ABSENT_PROVEN' "$tmp/AzhjKernelSuPreloader.java"
+          grep -Fq 'PRE_LATE_LOAD' "$tmp/AzhjKernelSuPreloader.java"
+          for stale in \
+            '.m3q-azhj-embedded-kernelsu.ko' \
+            'extract-binary' \
+            'EMBEDDED_MODULE_VERIFIED' \
+            'verifyEmbeddedModule('; do
+            if grep -Fq "$stale" "$tmp/AzhjKernelSuPreloader.java"; then
+              echo "FAIL: stale filesystem extraction contract remains in transformed preloader: $stale" >&2
+              exit 125
+            fi
+          done
+          echo 'AZHJ_PRELOADER_IN_MEMORY_SOURCE_GATE=PASS'
+
+          cp android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java "$tmp/M3qRootEngine.java"
+          cp android/app/build.gradle "$tmp/build.gradle"
+          python3 tools/prepare_azhj_app.py "$tmp/M3qRootEngine.java" "$tmp/build.gradle"
+          grep -Fq 'M3Q_AZHJ_REBOOT_REQUIRED:KSU_CONTROL_WITHOUT_FOREGROUND_RECEIPT' \
+            "$tmp/M3qRootEngine.java"
+          grep -Fq 'RootState preflight = checkRoot(false);' "$tmp/M3qRootEngine.java"
+          grep -Fq 'AZHJ bootstrap root appeared before exploit start' "$tmp/M3qRootEngine.java"
+          echo 'AZHJ_DIRTY_KSU_SOURCE_GATE=PASS'
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install exact Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'ndk;29.0.14206865'
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: azhj-kernelsu-compat-exact
+          path: ${{ runner.temp }}/azhj-ko
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: azhj-ksud-embedded
+          path: ${{ runner.temp }}/azhj-ksud
+
+      - name: Verify exact downloaded KernelSU artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ko="$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko"
+          ksud="$RUNNER_TEMP/azhj-ksud/ksud-azhj-embedded"
+          test -f "$ko"
+          test -f "$ksud"
+          ko_hash=$(sha256sum "$ko" | awk '{print $1}')
+          ksud_hash=$(sha256sum "$ksud" | awk '{print $1}')
+          echo "AZHJ_KSU_DOWNLOADED_SHA256=$ko_hash"
+          echo "AZHJ_FOREGROUND_KSUD_DOWNLOADED_SHA256=$ksud_hash"
+          test "$ko_hash" = e947f91c986e6594b965c7e65871bf8287542198484334945fe461d886a701c7
+          test "$ksud_hash" = 4c223b2bb90fb915788036cdc92a31b7484355535e0a81bf702d04ce120200c8
+          python3 tools/audit_azhj_ksud.py --ksud "$ksud"
+          echo 'AZHJ_DOWNLOADED_FOREGROUND_ARTIFACT_GATE=PASS'
+
+      - name: Regression build unchanged AZG3 app
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./android/build-native.sh
+          (
+            cd android
+            ./gradlew clean :app:assembleRelease
+          )
+          apk=android/app/build/outputs/apk/release/app-release.apk
+          test -f "$apk"
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          unzip -q "$apk" -d "$work"
+          grep -aFq 'S948NKSS4AZG3_OKR4AZG3:user/release-keys' "$work"/classes*.dex
+          if grep -aFq 'S948NKSU4AZHJ_OKR4AZHJ:user/release-keys' "$work"/classes*.dex; then
+            echo 'FAIL: default AZG3 APK unexpectedly contains AZHJ identity' >&2
+            exit 125
+          fi
+          unzip -Z1 "$apk" > "$work/apk-list.txt"
+          if grep -Eq 'kernelsu-azhj-kdp-m3q-compat\.ko|libm3qksumodule\.so' "$work/apk-list.txt"; then
+            echo 'FAIL: default AZG3 APK unexpectedly contains AZHJ KernelSU module' >&2
+            exit 125
+          fi
+          test "$(git hash-object android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java)" = \
+            76516319bfd3d3a7a03ed308f2dfb791db715f25
+          test "$(git hash-object android/app/build.gradle)" = \
+            f554159032883d83216de48765b3afa713ff4839
+          echo 'AZG3_APP_REGRESSION_GATE=PASS'
+
+      - name: Build audited AZHJ side-by-side APK
+        shell: bash
+        env:
+          M3Q_REVIEW_HEAD_SHA: ${{ env.REVIEW_HEAD_SHA }}
+        run: |
+          set -euo pipefail
+          android/build-azhj-apk.sh \
+            "$RUNNER_TEMP/azhj-ko/kernelsu-azhj-kdp-m3q-compat.ko" \
+            "$RUNNER_TEMP/azhj-ksud/ksud-azhj-embedded"
+
+      - name: Verify AZHJ overlay restored source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git hash-object android/app/src/main/java/dev/indevelopment/m3qroot/M3qRootEngine.java)" = \
+            76516319bfd3d3a7a03ed308f2dfb791db715f25
+          test "$(git hash-object android/app/build.gradle)" = \
+            f554159032883d83216de48765b3afa713ff4839
+          test ! -e android/app/src/main/java/dev/indevelopment/m3qroot/AzhjKernelSuPreloader.java
+          test ! -e android/app/src/main/jniLibs/arm64-v8a/libm3qksumodule.so
+          test ! -e android/app/src/main/assets/azhj/kernelsu-azhj-kdp-m3q-compat.ko
+          echo 'AZHJ_OVERLAY_RESTORE_GATE=PASS'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: m3q-root-AZHJ-preflight-unverified
+          path: |
+            android/app/build/outputs/apk/azhj/m3q-root-S948NKSU4AZHJ-preflight-unverified.apk
+            android/app/build/outputs/apk/azhj/AZHJ-BUILD-EVIDENCE.txt
+            android/app/build/outputs/apk/azhj/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,273 @@
+name: AZHJ port audit
+
+on:
+  push:
+    branches: [azhj-native-port]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  REVIEW_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+
+jobs:
+  ksud-container-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+      - name: Audit compressed KernelSU asset container
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tools/audit_azhj_ksud.py \
+            --ksud android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp
+          echo '--- ELF program headers ---'
+          readelf -l android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp
+          echo '--- relevant embedded strings ---'
+          strings -a android/prebuilt/ksud-m3q-S948NKSS4AZG3-kdp \
+            | grep -E 'android16-6\.12_kernelsu\.ko|extract-binary|late-load' \
+            | sort -u
+
+  native-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK 29
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager 'ndk;29.0.14206865'
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/29.0.14206865" >> "$GITHUB_ENV"
+      - name: Build AZHJ native payloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./android/build-native-azhj.sh
+          file exploit/build/m3q-BP4A.251205.006-AZHJ/bin/*
+          sha256sum exploit/build/m3q-BP4A.251205.006-AZHJ/bin/*
+
+  kernelsu-candidate-build:
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/ylarod/ddk-min@sha256:4dd088dc94b391c926cf09215e0a5958f3dfe7d8eeed3616f9041224f85b1d1a
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REVIEW_HEAD_SHA }}
+          fetch-depth: 1
+      - name: Assert exact review HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual=$(git -c safe.directory="$GITHUB_WORKSPACE" rev-parse HEAD)
+          echo "REVIEW_HEAD_SHA=$REVIEW_HEAD_SHA"
+          echo "CHECKOUT_HEAD_SHA=$actual"
+          test "$actual" = "$REVIEW_HEAD_SHA"
+
+      - name: Checkout KernelSU v3.2.5 and pinned Samsung patchset
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory '*'
+          git clone https://github.com/tiann/KernelSU.git /work/KernelSU
+          git -C /work/KernelSU checkout b0bc817b4e966aa6aa830834eaf6ef765d821d40
+          git clone https://github.com/BuSung-dev/Root-My-Galaxy-Payloads.git /work/rmg
+          git -C /work/rmg checkout 6e3223e689688540060ddd97a0927e927bfed207
+          git -C /work/KernelSU apply \
+            /work/rmg/kernelsu/patches/KernelSU-v3.2.5-samsung-kdp-rkp-defex.patch
+          git -C /work/KernelSU diff --check
+
+      - name: Pin exact AZHJ kernel release
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='6.12.30-android16-5-pd30ff70-abogkiS948NKSU4AZHJ-4k'
+          old=$(cat "$KDIR/include/config/kernel.release")
+          echo "ddk_release_before=$old"
+          printf '%s\n' "$target" > "$KDIR/include/config/kernel.release"
+          sed -i "s|$old|$target|g" "$KDIR/include/generated/utsrelease.h"
+          echo '--- exact release files ---'
+          cat "$KDIR/include/config/kernel.release"
+          cat "$KDIR/include/generated/utsrelease.h"
+
+      - name: Build Samsung KDP/RKP/DEFEX candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /work/KernelSU/kernel
+          make -C "$KDIR" M="$PWD" src="$PWD" clean
+          rm -f check_symbol
+          CONFIG_KSU=m \
+          CONFIG_KSU_SAMSUNG_KDP=y \
+          CONFIG_KSU_SAMSUNG_RKP=y \
+          CONFIG_KSU_SAMSUNG_DEFEX=y \
+          CC=clang make -j"$(nproc)"
+          cp kernelsu.ko /tmp/kernelsu-azhj-kdp.ko
+
+      - name: Build Samsung no-patch-text candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd /work/KernelSU/kernel
+          make -C "$KDIR" M="$PWD" src="$PWD" clean
+          rm -f check_symbol
+          CONFIG_KSU=m \
+          CONFIG_KSU_SAMSUNG_KDP=y \
+          CONFIG_KSU_SAMSUNG_RKP=y \
+          CONFIG_KSU_SAMSUNG_DEFEX=y \
+          CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y \
+          CC=clang make -j"$(nproc)"
+          cp kernelsu.ko /tmp/kernelsu-azhj-kdp-no-patch-text.ko
+
+      - name: Build proven-m3q KDP fallback candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/tools/apply_m3q_kdp_compat.py" \
+            /work/KernelSU/kernel/compat/samsung_kdp.c
+          git -C /work/KernelSU diff --check
+          grep -q '"kdp_usecount_sub_and_test"' /work/KernelSU/kernel/compat/samsung_kdp.c
+          grep -q '"kdp_usecount_dec_and_test"' /work/KernelSU/kernel/compat/samsung_kdp.c
+          grep -q 'samsung_kdp_put_cred_many(old_cred, 2);' \
+            /work/KernelSU/kernel/compat/samsung_kdp.c
+          echo '--- transformed Samsung KDP source ---'
+          sed -n '/static void samsung_kdp_put_cred_many/,/static void samsung_kdp_commit_worker/p' \
+            /work/KernelSU/kernel/compat/samsung_kdp.c
+
+          cd /work/KernelSU/kernel
+          make -C "$KDIR" M="$PWD" src="$PWD" clean
+          rm -f check_symbol
+          CONFIG_KSU=m \
+          CONFIG_KSU_SAMSUNG_KDP=y \
+          CONFIG_KSU_SAMSUNG_RKP=y \
+          CONFIG_KSU_SAMSUNG_DEFEX=y \
+          CONFIG_KSU_SAMSUNG_NO_PATCH_TEXT=y \
+          CC=clang make -j"$(nproc)"
+          cp kernelsu.ko /tmp/kernelsu-azhj-kdp-m3q-compat.ko
+
+      - name: Audit candidate metadata and imports
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in /tmp/kernelsu-azhj-*.ko; do
+            echo "===== $module ====="
+            sha256sum "$module"
+            file "$module"
+            echo '--- modinfo ---'
+            modinfo "$module" || true
+            echo '--- __versions ---'
+            readelf -SW "$module" | grep -E '__versions|\.symtab|\.strtab' || true
+            echo '--- undefined imports ---'
+            readelf -Ws "$module" \
+              | awk '$7 == "UND" && $8 != "" {print $8}' \
+              | sort -u | tee "${module}.imports"
+            echo "undefined_count=$(wc -l < "${module}.imports")"
+            echo '--- text-patching-sensitive imports ---'
+            grep -E '^(stop_machine|aarch64_insn_patch_text|patch_text|__aarch64_insn_write)' \
+              "${module}.imports" || true
+            echo '--- m3q KDP compatibility symbols/strings ---'
+            readelf -Ws "$module" \
+              | grep -E 'samsung_kdp_put_cred_many|kdp_usecount_(sub|dec)_and_test' || true
+            strings -a "$module" \
+              | grep -E '^kdp_usecount_(sub|dec)_and_test$' || true
+          done
+
+          module=/tmp/kernelsu-azhj-kdp-m3q-compat.ko
+          symbol_size() {
+            readelf -Ws "$module" \
+              | awk -v name="$1" '$8 == name { print $3; found=1 } END { if (!found) exit 1 }'
+          }
+          echo '--- m3q candidate KDP function sizes ---'
+          for symbol in \
+            ksu_samsung_kdp_put_cred \
+            samsung_kdp_put_cred_many \
+            ksu_samsung_kdp_init \
+            samsung_kdp_commit_worker; do
+            echo "$symbol=$(symbol_size "$symbol")"
+          done
+          echo '--- m3q candidate helper disassembly ---'
+          llvm-objdump -dr --disassemble-symbols=samsung_kdp_put_cred_many "$module"
+          echo '--- m3q candidate put_cred disassembly ---'
+          llvm-objdump -dr --disassemble-symbols=ksu_samsung_kdp_put_cred "$module"
+          echo '--- m3q candidate init disassembly ---'
+          llvm-objdump -dr --disassemble-symbols=ksu_samsung_kdp_init "$module"
+
+      - name: Upload raw KernelSU candidates
+        uses: actions/upload-artifact@v4
+        with:
+          name: azhj-kernelsu-candidates-raw
+          path: |
+            /tmp/kernelsu-azhj-*.ko
+            /tmp/kernelsu-azhj-*.ko.imports
+
+      - name: Verify m3q KernelSU contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(wc -l < /tmp/kernelsu-azhj-kdp-no-patch-text.ko.imports)" -eq 214
+          test "$(wc -l < /tmp/kernelsu-azhj-kdp-m3q-compat.ko.imports)" -eq 214
+          cmp -s \
+            /tmp/kernelsu-azhj-kdp-no-patch-text.ko.imports \
+            /tmp/kernelsu-azhj-kdp-m3q-compat.ko.imports
+
+          test -z "$(grep -E \
+            '^(stop_machine|aarch64_insn_patch_text|patch_text|__aarch64_insn_write)' \
+            /tmp/kernelsu-azhj-kdp-m3q-compat.ko.imports || true)"
+          readelf -Ws /tmp/kernelsu-azhj-kdp-m3q-compat.ko \
+            | grep 'samsung_kdp_put_cred_many' >/dev/null
+          strings -a /tmp/kernelsu-azhj-kdp-m3q-compat.ko \
+            | grep -x 'kdp_usecount_sub_and_test' >/dev/null
+          strings -a /tmp/kernelsu-azhj-kdp-m3q-compat.ko \
+            | grep -x 'kdp_usecount_dec_and_test' >/dev/null
+
+          module=/tmp/kernelsu-azhj-kdp-m3q-compat.ko
+          symbol_size() {
+            readelf -Ws "$module" \
+              | awk -v name="$1" '$8 == name { print $3; found=1 } END { if (!found) exit 1 }'
+          }
+          test "$(symbol_size ksu_samsung_kdp_put_cred)" -eq 148
+          test "$(symbol_size samsung_kdp_put_cred_many)" -eq 188
+          test "$(symbol_size ksu_samsung_kdp_init)" -eq 272
+          test "$(symbol_size samsung_kdp_commit_worker)" -eq 488
+
+      - name: Strip debug sections and hash candidates
+        shell: bash
+        run: |
+          set -euo pipefail
+          for module in /tmp/kernelsu-azhj-*.ko; do
+            llvm-strip -d "$module"
+          done
+          sha256sum /tmp/kernelsu-azhj-*.ko
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: azhj-kernelsu-candidates
+          path: |
+            /tmp/kernelsu-azhj-*.ko
+            /tmp/kernelsu-azhj-*.ko.imports
