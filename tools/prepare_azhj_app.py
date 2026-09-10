@@ -479,8 +479,8 @@ def main() -> int:
         raise SystemExit("FAIL: AZHJ interrupted preflight still fails open")
     if text.count(KSU_READY_EXACT_LINE) != 1:
         raise SystemExit("FAIL: AZHJ exact KernelSU ready receipt cardinality mismatch")
-    if text.count(KSU_ABSENT_EXACT_LINE) != 1:
-        raise SystemExit("FAIL: AZHJ exact KernelSU absence receipt cardinality mismatch")
+    if text.count(KSU_ABSENT_EXACT_LINE) != 2:
+        raise SystemExit("FAIL: AZHJ exact/family KernelSU absence receipt cardinality mismatch")
     if text.count(KSU_CONTROL_FAIL_PREFIX) != 1:
         raise SystemExit("FAIL: AZHJ KernelSU control-failure discriminator cardinality mismatch")
     if "ksuOutput.contains(\"KernelSU control verified version=32525\")" in text:
